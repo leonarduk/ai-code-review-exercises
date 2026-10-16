@@ -1,0 +1,92 @@
+diff --git a/src/com/example/statements/StatementImporter.java b/src/com/example/statements/StatementImporter.java
+--- a/src/com/example/statements/StatementImporter.java
++++ b/src/com/example/statements/StatementImporter.java
+@@ -1,12 +1,15 @@
+ package com.example.statements;
+ 
+ import java.math.BigDecimal;
++import java.text.NumberFormat;
++import java.text.ParseException;
+ import java.time.LocalDate;
+ import java.time.format.DateTimeParseException;
++import java.util.Locale;
+ 
+ /**
+  * Imports the bank's statement export for reconciliation. Each line is
+- * {@code date;description;amount}, e.g. {@code 2026-03-02;Card payment;-42.50}.
++ * {@code date;description;amount}, e.g. {@code 2026-03-02;Card payment;-1,250.50}.
+  */
+ public final class StatementImporter {
+ 
+@@ -29,11 +32,17 @@
+         return new StatementLine(date, fields[1].trim(), parseAmount(fields[2]));
+     }
+ 
++    /**
++     * Parses a UK-formatted amount from the export, such as {@code 1,250.50}
++     * or {@code -42.50}. The export always writes thousands separators.
++     */
+     public static BigDecimal parseAmount(String text) {
+         String trimmed = text.trim();
++        NumberFormat format = NumberFormat.getNumberInstance(Locale.UK);
+         try {
+-            return new BigDecimal(trimmed);
+-        } catch (NumberFormatException e) {
++            Number number = format.parse(trimmed);
++            return BigDecimal.valueOf(number.doubleValue());
++        } catch (ParseException e) {
+             throw new StatementFormatException("not an amount: '" + trimmed + "'", e);
+         }
+     }
+diff --git a/tests/com/example/statements/StatementImporterTest.java b/tests/com/example/statements/StatementImporterTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/statements/StatementImporterTest.java
+@@ -0,0 +1,47 @@
++package com.example.statements;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.time.LocalDate;
++import org.junit.jupiter.api.Test;
++
++class StatementImporterTest {
++
++    private static void assertAmount(String expected, BigDecimal actual) {
++        assertEquals(0, new BigDecimal(expected).compareTo(actual), () -> expected + " but was " + actual);
++    }
++
++    @Test
++    void parsesThousandsSeparators() {
++        assertAmount("1250.50", StatementImporter.parseAmount("1,250.50"));
++        assertAmount("1234567.89", StatementImporter.parseAmount("1,234,567.89"));
++    }
++
++    @Test
++    void parsesDebitsAndSmallAmounts() {
++        assertAmount("-42.50", StatementImporter.parseAmount("-42.50"));
++        assertAmount("0.99", StatementImporter.parseAmount(" 0.99 "));
++    }
++
++    @Test
++    void parsesAWholeLine() {
++        StatementLine line = StatementImporter.parseLine("2026-03-02;Card payment;-1,250.50");
++        assertEquals(LocalDate.of(2026, 3, 2), line.date());
++        assertEquals("Card payment", line.description());
++        assertAmount("-1250.50", line.amount());
++    }
++
++    @Test
++    void rejectsAnAmountThatIsNotANumber() {
++        assertThrows(StatementFormatException.class, () -> StatementImporter.parseAmount("n/a"));
++        assertThrows(StatementFormatException.class, () -> StatementImporter.parseAmount(""));
++    }
++
++    @Test
++    void rejectsALineWithMissingFields() {
++        assertThrows(StatementFormatException.class,
++                () -> StatementImporter.parseLine("2026-03-02;Card payment"));
++    }
++}

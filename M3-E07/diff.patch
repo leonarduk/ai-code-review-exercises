@@ -1,0 +1,69 @@
+diff --git a/penalties.py b/penalties.py
+new file mode 100644
+--- /dev/null
++++ b/penalties.py
+@@ -0,0 +1,36 @@
++"""CSDR cash penalties for late-settling instructions."""
++
++from __future__ import annotations
++
++from datetime import date, timedelta
++from decimal import Decimal, ROUND_HALF_EVEN
++from typing import AbstractSet
++
++CENT = Decimal("0.01")
++BASIS_POINTS = Decimal(10000)
++
++
++def business_days_late(intended: date, actual: date, holidays: AbstractSet[date]) -> int:
++    """Business days in [intended, actual): each day the instruction failed."""
++    if actual <= intended:
++        return 0
++    days = 0
++    day = intended
++    while day < actual:
++        if day.weekday() < 5 and day not in holidays:
++            days += 1
++        day += timedelta(days=1)
++    return days
++
++
++def penalty(
++    instruction_value: Decimal,
++    daily_rate_bps: Decimal,
++    intended: date,
++    actual: date,
++    holidays: AbstractSet[date],
++) -> Decimal:
++    """Penalty = value x daily rate x business days late, rounded to the cent."""
++    days = business_days_late(intended, actual, holidays)
++    amount = instruction_value * daily_rate_bps / BASIS_POINTS * days
++    return amount.quantize(CENT, rounding=ROUND_HALF_EVEN)
+diff --git a/tests/test_penalties.py b/tests/test_penalties.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_penalties.py
+@@ -0,0 +1,23 @@
++from datetime import date
++from decimal import Decimal
++
++from penalties import business_days_late, penalty
++
++NO_HOLIDAYS: set[date] = set()
++
++
++def test_one_day_late():
++    assert business_days_late(date(2026, 10, 14), date(2026, 10, 15), NO_HOLIDAYS) == 1
++
++
++def test_late_over_a_weekend():
++    assert business_days_late(date(2026, 10, 16), date(2026, 10, 20), NO_HOLIDAYS) == 2
++
++
++def test_settled_on_time():
++    assert business_days_late(date(2026, 10, 14), date(2026, 10, 14), NO_HOLIDAYS) == 0
++
++
++def test_penalty_amount():
++    # 1,000,000.00 x 1 bp x 2 days = 200.00
++    assert penalty(Decimal("1000000.00"), Decimal("1"), date(2026, 10, 16), date(2026, 10, 20), NO_HOLIDAYS) == Decimal("200.00")

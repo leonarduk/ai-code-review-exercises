@@ -1,0 +1,148 @@
+diff --git a/src/com/example/confirms/Confirmation.java b/src/com/example/confirms/Confirmation.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/confirms/Confirmation.java
+@@ -0,0 +1,19 @@
++package com.example.confirms;
++
++import java.math.BigDecimal;
++import java.time.LocalDate;
++import java.time.OffsetDateTime;
++import java.util.Objects;
++
++/** One line of a counterparty's end-of-day confirmation file. */
++public record Confirmation(String tradeId, LocalDate tradeDate, OffsetDateTime executedAt,
++                           BigDecimal quantity, BigDecimal price) {
++
++    public Confirmation {
++        Objects.requireNonNull(tradeId, "tradeId");
++        Objects.requireNonNull(tradeDate, "tradeDate");
++        Objects.requireNonNull(executedAt, "executedAt");
++        Objects.requireNonNull(quantity, "quantity");
++        Objects.requireNonNull(price, "price");
++    }
++}
+diff --git a/src/com/example/confirms/ConfirmationMatcher.java b/src/com/example/confirms/ConfirmationMatcher.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/confirms/ConfirmationMatcher.java
+@@ -0,0 +1,57 @@
++package com.example.confirms;
++
++import java.math.BigDecimal;
++import java.time.LocalDate;
++import java.time.OffsetDateTime;
++import java.time.format.DateTimeFormatter;
++import java.util.ArrayList;
++import java.util.List;
++
++/** Parses counterparty confirmation lines and matches them against booked trades (OPS-2741). */
++public final class ConfirmationMatcher {
++
++    private static final DateTimeFormatter TRADE_DATE = DateTimeFormatter.ofPattern("dd/MM/yyyy");
++    private static final int FIELDS = 5;
++
++    private ConfirmationMatcher() {
++    }
++
++    /** trade id; trade date (day/month/year); execution time (ISO 8601 with offset); quantity; price */
++    public static Confirmation parse(String line) {
++        String[] fields = line.split(";", -1);
++        if (fields.length != FIELDS) {
++            throw new IllegalArgumentException("expected " + FIELDS + " fields, got " + fields.length + ": " + line);
++        }
++        return new Confirmation(
++                fields[0].strip(),
++                LocalDate.parse(fields[1].strip(), TRADE_DATE),
++                OffsetDateTime.parse(fields[2].strip()),
++                new BigDecimal(fields[3].strip()),
++                new BigDecimal(fields[4].strip()));
++    }
++
++    /** The fields on which the confirmation and the trade disagree, in line order; empty when they match. */
++    public static List<String> mismatches(Confirmation confirmation, Trade trade) {
++        List<String> fields = new ArrayList<>();
++        if (!confirmation.tradeId().equals(trade.tradeId())) {
++            fields.add("tradeId");
++        }
++        if (!confirmation.tradeDate().equals(trade.tradeDate())) {
++            fields.add("tradeDate");
++        }
++        if (!confirmation.executedAt().equals(trade.executedAt())) {
++            fields.add("executedAt");
++        }
++        if (confirmation.quantity().compareTo(trade.quantity()) != 0) {
++            fields.add("quantity");
++        }
++        if (confirmation.price().compareTo(trade.price()) != 0) {
++            fields.add("price");
++        }
++        return List.copyOf(fields);
++    }
++
++    public static boolean matches(Confirmation confirmation, Trade trade) {
++        return mismatches(confirmation, trade).isEmpty();
++    }
++}
+diff --git a/tests/com/example/confirms/ConfirmationMatcherTest.java b/tests/com/example/confirms/ConfirmationMatcherTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/confirms/ConfirmationMatcherTest.java
+@@ -0,0 +1,57 @@
++package com.example.confirms;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.math.BigDecimal;
++import java.time.LocalDate;
++import java.time.OffsetDateTime;
++import java.time.format.DateTimeParseException;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class ConfirmationMatcherTest {
++
++    private static final Trade BOOKED = new Trade("T-1001", LocalDate.of(2026, 4, 14),
++            OffsetDateTime.parse("2026-04-14T09:30:00+01:00"), new BigDecimal("250000"), new BigDecimal("101.25"));
++
++    @Test
++    void parsesALine() {
++        Confirmation c = ConfirmationMatcher.parse("T-1001;14/04/2026;2026-04-14T09:30:00+01:00;250000;101.25");
++        assertEquals("T-1001", c.tradeId());
++        assertEquals(LocalDate.of(2026, 4, 14), c.tradeDate());
++        assertEquals(OffsetDateTime.parse("2026-04-14T09:30:00+01:00"), c.executedAt());
++        assertEquals(new BigDecimal("250000"), c.quantity());
++    }
++
++    @Test
++    void matchingConfirmation() {
++        Confirmation c = ConfirmationMatcher.parse("T-1001;14/04/2026;2026-04-14T09:30:00+01:00;250000;101.25");
++        assertTrue(ConfirmationMatcher.matches(c, BOOKED));
++    }
++
++    @Test
++    void quantityAndPriceAreComparedByValue() {
++        Confirmation c = ConfirmationMatcher.parse("T-1001;14/04/2026;2026-04-14T09:30:00+01:00;250000.00;101.2500");
++        assertTrue(ConfirmationMatcher.matches(c, BOOKED));
++    }
++
++    @Test
++    void reportsEachFieldThatDiffers() {
++        Confirmation c = ConfirmationMatcher.parse("T-1001;15/04/2026;2026-04-14T09:30:00+01:00;250000;101.30");
++        assertEquals(List.of("tradeDate", "price"), ConfirmationMatcher.mismatches(c, BOOKED));
++    }
++
++    @Test
++    void rejectsAnInvalidTradeDate() {
++        assertThrows(DateTimeParseException.class,
++                () -> ConfirmationMatcher.parse("T-1001;32/04/2026;2026-04-14T09:30:00+01:00;250000;101.25"));
++    }
++
++    @Test
++    void rejectsALineWithMissingFields() {
++        assertThrows(IllegalArgumentException.class,
++                () -> ConfirmationMatcher.parse("T-1001;14/04/2026;250000;101.25"));
++    }
++}

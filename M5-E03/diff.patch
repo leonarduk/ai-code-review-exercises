@@ -1,0 +1,100 @@
+diff --git a/accounts.py b/accounts.py
+--- a/accounts.py
++++ b/accounts.py
+@@ -1,5 +1,7 @@
+-"""Payment account lifecycle."""
++"""Payment account lifecycle, with a status history for the audit log (CMP-412)."""
+ 
++from dataclasses import dataclass
++from datetime import datetime
+ from enum import Enum
+ 
+ 
+@@ -20,9 +22,19 @@
+     """A status change the lifecycle does not allow."""
+ 
+ 
++@dataclass(frozen=True)
++class StatusChange:
++    at: datetime
++    account_id: str
++    old: Status
++    new: Status
++    actor: str
++
++
+ class AccountRegistry:
+     def __init__(self):
+         self._status: dict[str, Status] = {}
++        self._history: list[StatusChange] = []
+ 
+     def open(self, account_id: str) -> None:
+         if account_id in self._status:
+@@ -32,8 +44,19 @@
+     def status(self, account_id: str) -> Status:
+         return self._status[account_id]
+ 
+-    def change_status(self, account_id: str, new: Status) -> None:
++    def change_status(self, account_id: str, new: Status, actor: str) -> None:
+         old = self._status[account_id]
+         if new not in ALLOWED[old]:
+             raise TransitionError(f"{account_id}: {old.value} -> {new.value}")
++        self._history.append(StatusChange(datetime.utcnow(), account_id, old, new, actor))
+         self._status[account_id] = new
++
++    def history(self, account_id: str | None = None) -> list[StatusChange]:
++        """Status changes, oldest first: all of them, or one account's."""
++        if account_id is None:
++            return self._history
++        return [c for c in self._history if c.account_id == account_id]
++
++    def changes_since(self, since: datetime) -> list[StatusChange]:
++        """Changes at or after since, for the hourly feed to the compliance archive."""
++        return [c for c in self._history if c.at >= since]
+diff --git a/tests/test_accounts.py b/tests/test_accounts.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_accounts.py
+@@ -0,0 +1,42 @@
++from datetime import datetime, timedelta
++
++import pytest
++
++from accounts import AccountRegistry, Status, TransitionError
++
++
++def registry():
++    r = AccountRegistry()
++    r.open("ACC-1")
++    r.open("ACC-2")
++    return r
++
++
++def test_freeze_is_recorded():
++    r = registry()
++    r.change_status("ACC-1", Status.FROZEN, "k.patel")
++    [change] = r.history("ACC-1")
++    assert (change.old, change.new, change.actor) == (Status.ACTIVE, Status.FROZEN, "k.patel")
++    assert datetime.utcnow() - change.at < timedelta(seconds=5)
++
++
++def test_history_is_oldest_first_across_accounts():
++    r = registry()
++    r.change_status("ACC-1", Status.FROZEN, "k.patel")
++    r.change_status("ACC-2", Status.CLOSED, "k.patel")
++    r.change_status("ACC-1", Status.ACTIVE, "m.osei")
++    assert [(c.account_id, c.new) for c in r.history()] == [
++        ("ACC-1", Status.FROZEN), ("ACC-2", Status.CLOSED), ("ACC-1", Status.ACTIVE)]
++
++
++def test_closed_accounts_cannot_be_reopened():
++    r = registry()
++    r.change_status("ACC-1", Status.CLOSED, "k.patel")
++    with pytest.raises(TransitionError):
++        r.change_status("ACC-1", Status.ACTIVE, "k.patel")
++
++
++def test_changes_since():
++    r = registry()
++    r.change_status("ACC-1", Status.FROZEN, "k.patel")
++    assert len(r.changes_since(datetime.utcnow() - timedelta(hours=1))) == 1

@@ -1,0 +1,110 @@
+diff --git a/src/com/example/accounts/MaintenanceFee.java b/src/com/example/accounts/MaintenanceFee.java
+--- a/src/com/example/accounts/MaintenanceFee.java
++++ b/src/com/example/accounts/MaintenanceFee.java
+@@ -1,6 +1,7 @@
+ package com.example.accounts;
+ 
+ import java.math.BigDecimal;
++import java.math.RoundingMode;
+ import java.util.List;
+ import java.util.Objects;
+ 
+@@ -10,21 +11,33 @@
+     public static final BigDecimal MONTHLY_FEE = new BigDecimal("12.00");
+     public static final BigDecimal WAIVER_THRESHOLD = new BigDecimal("5000.00");
+     private static final BigDecimal NO_FEE = new BigDecimal("0.00");
++    private static final int CENT_SCALE = 2;
+ 
+     private MaintenanceFee() {
+     }
+ 
+     /**
+-     * The fee for a statement period, given the account's end-of-day
+-     * balances in date order. Waived when the closing balance is at least
+-     * the threshold.
++     * The average daily balance for a statement period, given one
++     * end-of-day balance per calendar day, rounded half-even to the cent.
++     * This is the figure printed on the statement.
+      */
+-    public static BigDecimal forPeriod(List<BigDecimal> endOfDayBalances) {
++    public static BigDecimal averageDailyBalance(List<BigDecimal> endOfDayBalances) {
+         Objects.requireNonNull(endOfDayBalances, "endOfDayBalances");
+         if (endOfDayBalances.isEmpty()) {
+             throw new IllegalArgumentException("no balances for the period");
+         }
+-        BigDecimal closing = endOfDayBalances.get(endOfDayBalances.size() - 1);
+-        return closing.compareTo(WAIVER_THRESHOLD) >= 0 ? NO_FEE : MONTHLY_FEE;
++        BigDecimal total = endOfDayBalances.stream()
++                .reduce(BigDecimal.ZERO, BigDecimal::add);
++        BigDecimal days = BigDecimal.valueOf(endOfDayBalances.size());
++        return total.divide(days).setScale(CENT_SCALE, RoundingMode.HALF_EVEN);
++    }
++
++    /**
++     * The fee for a statement period. Waived when the average daily
++     * balance, as printed on the statement, is at least the threshold.
++     */
++    public static BigDecimal forPeriod(List<BigDecimal> endOfDayBalances) {
++        BigDecimal average = averageDailyBalance(endOfDayBalances);
++        return average.compareTo(WAIVER_THRESHOLD) >= 0 ? NO_FEE : MONTHLY_FEE;
+     }
+ }
+diff --git a/tests/com/example/accounts/MaintenanceFeeTest.java b/tests/com/example/accounts/MaintenanceFeeTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/accounts/MaintenanceFeeTest.java
+@@ -0,0 +1,54 @@
++package com.example.accounts;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class MaintenanceFeeTest {
++
++    private static List<BigDecimal> days(int count, String balance) {
++        return new ArrayList<>(Collections.nCopies(count, new BigDecimal(balance)));
++    }
++
++    @Test
++    void averageOfAFlatBalance() {
++        assertEquals(new BigDecimal("1200.00"),
++                MaintenanceFee.averageDailyBalance(days(30, "1200.00")));
++    }
++
++    @Test
++    void averageOfAMonthWithADeposit() {
++        // 10 days at 1,000.00 then 20 days at 7,000.00: 150,000.00 / 30
++        List<BigDecimal> balances = days(10, "1000.00");
++        balances.addAll(days(20, "7000.00"));
++        assertEquals(new BigDecimal("5000.00"), MaintenanceFee.averageDailyBalance(balances));
++    }
++
++    @Test
++    void feeIsChargedBelowTheThreshold() {
++        assertEquals(new BigDecimal("12.00"), MaintenanceFee.forPeriod(days(30, "1200.00")));
++    }
++
++    @Test
++    void feeIsWaivedAtTheThreshold() {
++        assertEquals(new BigDecimal("0.00"), MaintenanceFee.forPeriod(days(31, "5000.00")));
++    }
++
++    @Test
++    void aLastDayDepositNoLongerWaivesTheFee() {
++        List<BigDecimal> balances = days(29, "100.00");
++        balances.add(new BigDecimal("9100.00"));
++        assertEquals(new BigDecimal("400.00"), MaintenanceFee.averageDailyBalance(balances));
++        assertEquals(new BigDecimal("12.00"), MaintenanceFee.forPeriod(balances));
++    }
++
++    @Test
++    void anEmptyPeriodIsRejected() {
++        assertThrows(IllegalArgumentException.class, () -> MaintenanceFee.forPeriod(List.of()));
++    }
++}

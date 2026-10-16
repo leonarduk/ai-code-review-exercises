@@ -1,0 +1,115 @@
+diff --git a/allocation.py b/allocation.py
+new file mode 100644
+--- /dev/null
++++ b/allocation.py
+@@ -0,0 +1,57 @@
++"""Pro-rata allocation of platform fees across client accounts."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from decimal import Decimal, ROUND_HALF_EVEN
++from typing import Mapping
++
++CENT = Decimal("0.01")
++
++
++class AllocationError(ValueError):
++    """Raised when an amount cannot be allocated across the given balances."""
++
++
++@dataclass(frozen=True)
++class Allocation:
++    account_id: str
++    balance: Decimal
++    amount: Decimal
++
++
++def _to_cents(value: Decimal) -> Decimal:
++    return value.quantize(CENT, rounding=ROUND_HALF_EVEN)
++
++
++def allocate(total: Decimal, balances: Mapping[str, Decimal]) -> list[Allocation]:
++    """Split ``total`` across accounts in proportion to their balances.
++
++    Each share is rounded to the cent. Any rounding residue is assigned to the
++    account with the largest balance (the first such account on a tie), so the
++    allocated amounts always sum to ``total``.
++    """
++    if total != _to_cents(total):
++        raise AllocationError(f"total {total} is not a whole number of cents")
++    if not balances:
++        raise AllocationError("no accounts to allocate across")
++    if any(balance < 0 for balance in balances.values()):
++        raise AllocationError("balances must not be negative")
++    total_balance = sum(balances.values(), Decimal(0))
++    if total_balance == 0:
++        raise AllocationError("cannot allocate across a zero total balance")
++
++    raw_shares = {
++        account: total * balance / total_balance
++        for account, balance in balances.items()
++    }
++    amounts = {account: _to_cents(share) for account, share in raw_shares.items()}
++
++    residue = total - sum(raw_shares.values())
++    largest = max(balances, key=balances.__getitem__)
++    amounts[largest] += _to_cents(residue)
++
++    return [
++        Allocation(account, balances[account], amounts[account])
++        for account in balances
++    ]
+diff --git a/tests/test_allocation.py b/tests/test_allocation.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_allocation.py
+@@ -0,0 +1,48 @@
++from decimal import Decimal
++
++import pytest
++
++from allocation import AllocationError, allocate
++
++
++def amounts(allocations):
++    return {a.account_id: a.amount for a in allocations}
++
++
++def test_allocates_in_proportion_to_balance():
++    result = allocate(
++        Decimal("1000.00"), {"ACC-1": Decimal("600000"), "ACC-2": Decimal("400000")}
++    )
++    assert amounts(result) == {"ACC-1": Decimal("600.00"), "ACC-2": Decimal("400.00")}
++
++
++@pytest.mark.parametrize(
++    ("total", "balances"),
++    [
++        ("100.00", {"A": "1", "B": "3"}),
++        ("250.00", {"A": "10", "B": "10", "C": "30"}),
++        ("0.00", {"A": "5", "B": "7"}),
++    ],
++)
++def test_allocations_sum_to_total(total, balances):
++    result = allocate(Decimal(total), {k: Decimal(v) for k, v in balances.items()})
++    assert sum(a.amount for a in result) == Decimal(total)
++
++
++def test_result_preserves_input_order():
++    result = allocate(Decimal("10.00"), {"Z": Decimal("1"), "A": Decimal("1")})
++    assert [a.account_id for a in result] == ["Z", "A"]
++
++
++@pytest.mark.parametrize(
++    ("total", "balances"),
++    [
++        ("10.005", {"A": Decimal("1")}),
++        ("10.00", {}),
++        ("10.00", {"A": Decimal("-1"), "B": Decimal("2")}),
++        ("10.00", {"A": Decimal("0"), "B": Decimal("0")}),
++    ],
++)
++def test_invalid_input_is_rejected(total, balances):
++    with pytest.raises(AllocationError):
++        allocate(Decimal(total), balances)

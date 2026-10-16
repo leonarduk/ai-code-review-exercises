@@ -1,0 +1,118 @@
+diff --git a/money.py b/money.py
+--- a/money.py
++++ b/money.py
+@@ -1,10 +1,62 @@
+-"""Monetary rounding helpers."""
++"""Currency-aware rounding, parsing and formatting of monetary amounts."""
+ 
+-from decimal import Decimal, ROUND_HALF_EVEN
++from __future__ import annotations
+ 
+-CENT = Decimal("0.01")
++from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
++
++# ISO 4217 minor units for the currencies we settle in.
++MINOR_UNITS: dict[str, int] = {
++    "CHF": 2,
++    "EUR": 2,
++    "GBP": 2,
++    "JPY": 0,
++    "KWD": 3,
++    "USD": 2,
++}
+ 
+ 
+-def round_cents(amount: Decimal) -> Decimal:
+-    """Round ``amount`` to the cent with banker's rounding."""
+-    return amount.quantize(CENT, rounding=ROUND_HALF_EVEN)
++class MoneyError(ValueError):
++    """Base class for monetary validation errors."""
++
++
++class UnsupportedCurrencyError(MoneyError):
++    """Raised for a currency code we do not settle in."""
++
++
++class InvalidAmountError(MoneyError):
++    """Raised when an amount string cannot be parsed."""
++
++
++def minor_units(currency: str) -> int:
++    """Number of decimal places used by ``currency``."""
++    return MINOR_UNITS.get(currency.upper(), 2)
++
++
++def quantum(currency: str) -> Decimal:
++    """The smallest unit of ``currency``, e.g. Decimal('0.01') for USD."""
++    return Decimal(1).scaleb(-minor_units(currency))
++
++
++def round_amount(amount: Decimal, currency: str) -> Decimal:
++    """Round ``amount`` to the minor units of ``currency`` (banker's rounding)."""
++    return amount.quantize(quantum(currency), rounding=ROUND_HALF_EVEN)
++
++
++def parse_amount(text: str, currency: str) -> Decimal:
++    """Parse an amount string from an upload file, rounded for ``currency``.
++
++    The decimal separator is a dot; no thousands separators.
++    """
++    try:
++        value = Decimal(text.strip())
++    except InvalidOperation as exc:
++        raise InvalidAmountError(f"cannot parse amount {text!r}: {exc.message}") from exc
++    if not value.is_finite():
++        raise InvalidAmountError(f"amount must be finite, got {text!r}")
++    return round_amount(value, currency)
++
++
++def format_amount(amount: Decimal, currency: str) -> str:
++    """Format ``amount`` with thousands separators, e.g. '1,234.50 USD'."""
++    places = minor_units(currency)
++    return f"{round_amount(amount, currency):,.{places}f} {currency.upper()}"
+diff --git a/tests/test_money.py b/tests/test_money.py
+--- a/tests/test_money.py
++++ b/tests/test_money.py
+@@ -1,8 +1,38 @@
+ from decimal import Decimal
+ 
+-from money import round_cents
++import pytest
++
++from money import format_amount, parse_amount, round_amount
+ 
+ 
+-def test_round_cents_is_half_even():
+-    assert round_cents(Decimal("2.345")) == Decimal("2.34")
+-    assert round_cents(Decimal("2.355")) == Decimal("2.36")
++@pytest.mark.parametrize(
++    ("amount", "currency", "expected"),
++    [
++        ("2.345", "USD", "2.34"),
++        ("2.355", "EUR", "2.36"),
++        ("1234.5", "JPY", "1234"),
++        ("1.23456", "KWD", "1.235"),
++    ],
++)
++def test_round_amount_uses_currency_minor_units(amount, currency, expected):
++    assert round_amount(Decimal(amount), currency) == Decimal(expected)
++
++
++def test_parse_amount_rounds_for_currency():
++    assert parse_amount(" 1500.125 ", "GBP") == Decimal("1500.12")
++
++
++def test_parse_amount_accepts_lower_case_currency():
++    assert parse_amount("10", "chf") == Decimal("10.00")
++
++
++@pytest.mark.parametrize(
++    ("amount", "currency", "expected"),
++    [
++        ("1234567.891", "USD", "1,234,567.89 USD"),
++        ("1234567.891", "KWD", "1,234,567.891 KWD"),
++        ("1234567", "JPY", "1,234,567 JPY"),
++    ],
++)
++def test_format_amount(amount, currency, expected):
++    assert format_amount(Decimal(amount), currency) == expected

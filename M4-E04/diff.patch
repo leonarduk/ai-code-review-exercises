@@ -1,0 +1,93 @@
+diff --git a/src/com/example/financing/FinancingCharge.java b/src/com/example/financing/FinancingCharge.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/financing/FinancingCharge.java
+@@ -0,0 +1,42 @@
++package com.example.financing;
++
++import java.math.BigDecimal;
++import java.math.RoundingMode;
++import java.time.Duration;
++import java.time.LocalDate;
++import java.time.ZoneId;
++import java.util.Currency;
++import java.util.Map;
++
++/** Overnight financing on leveraged positions (FIN-1184). */
++public final class FinancingCharge {
++
++    private static final ZoneId LONDON = ZoneId.of("Europe/London");
++    private static final Map<String, Integer> DAY_COUNT_BASIS =
++            Map.of("GBP", 365, "JPY", 365, "USD", 360, "EUR", 360, "CHF", 360);
++
++    private FinancingCharge() {
++    }
++
++    /** Nights the position is held: one per London calendar day from the open date to the close date. */
++    public static long nights(LocalDate openDate, LocalDate closeDate) {
++        if (closeDate.isBefore(openDate)) {
++            throw new IllegalArgumentException("closed before it was opened");
++        }
++        return Duration.between(openDate.atStartOfDay(LONDON), closeDate.atStartOfDay(LONDON)).toDays();
++    }
++
++    /** notional x annual rate x nights / basis, rounded half-even to the currency's minor unit. */
++    public static BigDecimal charge(Position position, BigDecimal annualRate, LocalDate openDate,
++            LocalDate closeDate) {
++        Integer basis = DAY_COUNT_BASIS.get(position.currency());
++        if (basis == null) {
++            throw new IllegalArgumentException("no day count basis for " + position.currency());
++        }
++        int minorUnits = Currency.getInstance(position.currency()).getDefaultFractionDigits();
++        return position.notional()
++                .multiply(annualRate)
++                .multiply(BigDecimal.valueOf(nights(openDate, closeDate)))
++                .divide(BigDecimal.valueOf(basis), minorUnits, RoundingMode.HALF_EVEN);
++    }
++}
+diff --git a/tests/com/example/financing/FinancingChargeTest.java b/tests/com/example/financing/FinancingChargeTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/financing/FinancingChargeTest.java
+@@ -0,0 +1,41 @@
++package com.example.financing;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.time.LocalDate;
++import org.junit.jupiter.api.Test;
++
++class FinancingChargeTest {
++
++    @Test
++    void oneNightMidweek() {
++        assertEquals(1, FinancingCharge.nights(LocalDate.of(2026, 6, 9), LocalDate.of(2026, 6, 10)));
++    }
++
++    @Test
++    void aWeekendIsThreeNights() {
++        assertEquals(3, FinancingCharge.nights(LocalDate.of(2026, 6, 12), LocalDate.of(2026, 6, 15)));
++    }
++
++    @Test
++    void sterlingChargeIsActual365() {
++        Position p = new Position("P-1", "GBP", new BigDecimal("10000000.00"));
++        assertEquals(new BigDecimal("4109.59"), FinancingCharge.charge(p, new BigDecimal("0.05"),
++                LocalDate.of(2026, 6, 12), LocalDate.of(2026, 6, 15)));
++    }
++
++    @Test
++    void dollarChargeIsActual360() {
++        Position p = new Position("P-2", "USD", new BigDecimal("3600000.00"));
++        assertEquals(new BigDecimal("1000.00"), FinancingCharge.charge(p, new BigDecimal("0.05"),
++                LocalDate.of(2026, 6, 9), LocalDate.of(2026, 6, 11)));
++    }
++
++    @Test
++    void closingBeforeOpeningIsRejected() {
++        assertThrows(IllegalArgumentException.class,
++                () -> FinancingCharge.nights(LocalDate.of(2026, 6, 10), LocalDate.of(2026, 6, 9)));
++    }
++}

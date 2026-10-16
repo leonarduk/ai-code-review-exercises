@@ -1,0 +1,129 @@
+diff --git a/src/com/example/clearing/Payment.java b/src/com/example/clearing/Payment.java
+--- a/src/com/example/clearing/Payment.java
++++ b/src/com/example/clearing/Payment.java
+@@ -1,5 +1,18 @@
+ package com.example.clearing;
++
++import java.math.BigDecimal;
+ 
+ /** A sterling payment in a clearing submission, with its amount in pence. */
+ public record Payment(String reference, String sortCode, String accountNumber, long amountPence) {
++
++    /** A payment from an amount in pounds; fractions of a penny are rejected. */
++    public static Payment ofPounds(String reference, String sortCode, String accountNumber, BigDecimal pounds) {
++        long pence;
++        try {
++            pence = pounds.movePointRight(2).longValueExact();
++        } catch (ArithmeticException e) {
++            throw new IllegalArgumentException(reference + ": " + pounds + " is not a whole number of pence", e);
++        }
++        return new Payment(reference, sortCode, accountNumber, pence);
++    }
+ }
+diff --git a/src/com/example/clearing/SubmissionTrailer.java b/src/com/example/clearing/SubmissionTrailer.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/clearing/SubmissionTrailer.java
+@@ -0,0 +1,43 @@
++package com.example.clearing;
++
++import java.util.List;
++import java.util.Locale;
++
++/** The trailer record of a clearing submission: payment count and total in pence (CLR-219). */
++public record SubmissionTrailer(int count, long totalPence) {
++
++    static final int MAX_COUNT = 9_999_999;
++    static final long MAX_TOTAL_PENCE = 99_999_999_999_999L;
++
++    public static SubmissionTrailer of(List<Payment> payments) {
++        if (payments.isEmpty()) {
++            throw new IllegalArgumentException("a submission needs at least one payment");
++        }
++        if (payments.size() > MAX_COUNT) {
++            throw new IllegalArgumentException("too many payments for one submission: " + payments.size());
++        }
++        var total = 0;
++        for (Payment p : payments) {
++            if (p.amountPence() <= 0) {
++                throw new IllegalArgumentException(p.reference() + ": amount must be positive");
++            }
++            total += p.amountPence();
++        }
++        if (total > MAX_TOTAL_PENCE) {
++            throw new IllegalArgumentException("submission total does not fit the trailer: " + total);
++        }
++        return new SubmissionTrailer(payments.size(), total);
++    }
++
++    /** TRL, the count as 7 digits and the total in pence as 14 digits. */
++    public String line() {
++        return "TRL" + String.format(Locale.ROOT, "%07d%014d", count, totalPence);
++    }
++
++    /** The submission's records followed by its trailer. */
++    public static List<String> file(List<Payment> payments) {
++        SubmissionTrailer trailer = of(payments);
++        return java.util.stream.Stream.concat(Submission.records(payments).stream(),
++                java.util.stream.Stream.of(trailer.line())).toList();
++    }
++}
+diff --git a/tests/com/example/clearing/SubmissionTrailerTest.java b/tests/com/example/clearing/SubmissionTrailerTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/clearing/SubmissionTrailerTest.java
+@@ -0,0 +1,54 @@
++package com.example.clearing;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class SubmissionTrailerTest {
++
++    private static Payment pounds(String reference, String amount) {
++        return Payment.ofPounds(reference, "200415", "38290008", new BigDecimal(amount));
++    }
++
++    @Test
++    void countAndTotal() {
++        SubmissionTrailer trailer = SubmissionTrailer.of(List.of(pounds("INV-1", "125.40"), pounds("INV-2", "74.60")));
++        assertEquals(new SubmissionTrailer(2, 20000), trailer);
++    }
++
++    @Test
++    void trailerLineIsFixedWidth() {
++        assertEquals("TRL000000200000000020000", new SubmissionTrailer(2, 20000).line());
++    }
++
++    @Test
++    void fileEndsWithTheTrailer() {
++        List<String> file = SubmissionTrailer.file(List.of(pounds("INV-1", "1250.00")));
++        assertEquals(List.of("PAY2004153829000800000125000INV-1", "TRL000000100000000125000"), file);
++    }
++
++    @Test
++    void poundsAreConvertedToPence() {
++        assertEquals(1999, pounds("INV-1", "19.99").amountPence());
++        assertEquals(500, pounds("INV-1", "5").amountPence());
++    }
++
++    @Test
++    void fractionsOfAPennyAreRejected() {
++        assertThrows(IllegalArgumentException.class, () -> pounds("INV-1", "10.005"));
++    }
++
++    @Test
++    void anEmptySubmissionIsRejected() {
++        assertThrows(IllegalArgumentException.class, () -> SubmissionTrailer.of(List.of()));
++    }
++
++    @Test
++    void aZeroPaymentIsRejected() {
++        assertThrows(IllegalArgumentException.class,
++                () -> SubmissionTrailer.of(List.of(new Payment("INV-1", "200415", "38290008", 0))));
++    }
++}

@@ -1,0 +1,76 @@
+diff --git a/src/com/example/billing/InstalmentPlan.java b/src/com/example/billing/InstalmentPlan.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/billing/InstalmentPlan.java
+@@ -0,0 +1,37 @@
++package com.example.billing;
++
++import java.math.BigDecimal;
++import java.math.RoundingMode;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++import java.util.Objects;
++
++/** Splits an invoice total into equal instalments. */
++public final class InstalmentPlan {
++
++    private static final int CENT_SCALE = 2;
++
++    private InstalmentPlan() {
++    }
++
++    /**
++     * Splits {@code total} into {@code count} instalments that sum exactly to
++     * {@code total}. Every instalment but the last is total / count rounded
++     * toward zero to the cent; the last takes whatever remains.
++     */
++    public static List<BigDecimal> split(BigDecimal total, int count) {
++        Objects.requireNonNull(total, "total");
++        if (count < 1) {
++            throw new IllegalArgumentException("count must be at least 1, got " + count);
++        }
++        if (total.stripTrailingZeros().scale() > CENT_SCALE) {
++            throw new IllegalArgumentException("total has fractions of a cent: " + total);
++        }
++        BigDecimal regular = total.divide(BigDecimal.valueOf(count), CENT_SCALE, RoundingMode.DOWN);
++        List<BigDecimal> instalments = new ArrayList<>(Collections.nCopies(count - 1, regular));
++        BigDecimal last = total.subtract(regular.multiply(BigDecimal.valueOf(count - 1)));
++        instalments.add(last.setScale(CENT_SCALE));
++        return instalments;
++    }
++}
+diff --git a/tests/com/example/billing/InstalmentPlanTest.java b/tests/com/example/billing/InstalmentPlanTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/billing/InstalmentPlanTest.java
+@@ -0,0 +1,29 @@
++package com.example.billing;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class InstalmentPlanTest {
++
++    @Test
++    void evenSplit() {
++        assertEquals(List.of(new BigDecimal("100.00"), new BigDecimal("100.00"), new BigDecimal("100.00")),
++                InstalmentPlan.split(new BigDecimal("300.00"), 3));
++    }
++
++    @Test
++    void lastInstalmentTakesTheRemainder() {
++        assertEquals(List.of(new BigDecimal("33.33"), new BigDecimal("33.33"), new BigDecimal("33.34")),
++                InstalmentPlan.split(new BigDecimal("100.00"), 3));
++    }
++
++    @Test
++    void invalidInputIsRejected() {
++        assertThrows(IllegalArgumentException.class, () -> InstalmentPlan.split(new BigDecimal("12.345"), 2));
++        assertThrows(IllegalArgumentException.class, () -> InstalmentPlan.split(new BigDecimal("100.00"), 0));
++    }
++}

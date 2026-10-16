@@ -1,0 +1,103 @@
+diff --git a/src/com/example/money/MoneyRounding.java b/src/com/example/money/MoneyRounding.java
+--- a/src/com/example/money/MoneyRounding.java
++++ b/src/com/example/money/MoneyRounding.java
+@@ -2,15 +2,35 @@
+ 
+ import java.math.BigDecimal;
+ import java.math.RoundingMode;
++import java.util.Currency;
++import java.util.Locale;
++import java.util.Objects;
+ 
+-/** Rounding of monetary amounts. */
++/** Rounding and display of amounts in each currency's ISO 4217 minor units. */
+ public final class MoneyRounding {
+ 
+     private MoneyRounding() {
+     }
+ 
+-    /** Rounds {@code amount} to the cent, half-even. */
+-    public static BigDecimal roundCents(BigDecimal amount) {
+-        return amount.setScale(2, RoundingMode.HALF_EVEN);
++    /** Rounds {@code amount} to the minor units of {@code currencyCode}, half-even. */
++    public static BigDecimal round(BigDecimal amount, String currencyCode) {
++        Objects.requireNonNull(amount, "amount");
++        Currency currency = settlementCurrency(currencyCode);
++        return amount.setScale(currency.getDefaultFractionDigits(), RoundingMode.HALF_EVEN);
++    }
++
++    /** Formats {@code amount} for client statements, e.g. {@code "1250.50 USD"}. */
++    public static String format(BigDecimal amount, String currencyCode) {
++        BigDecimal rounded = round(amount, currencyCode);
++        return rounded.stripTrailingZeros().toString() + " " + currencyCode.toUpperCase(Locale.ROOT);
++    }
++
++    private static Currency settlementCurrency(String currencyCode) {
++        Objects.requireNonNull(currencyCode, "currencyCode");
++        try {
++            return Currency.getInstance(currencyCode.toUpperCase(Locale.ROOT));
++        } catch (IllegalArgumentException e) {
++            throw new UnsupportedCurrencyException(currencyCode, e);
++        }
+     }
+ }
+diff --git a/src/com/example/money/UnsupportedCurrencyException.java b/src/com/example/money/UnsupportedCurrencyException.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/money/UnsupportedCurrencyException.java
+@@ -0,0 +1,9 @@
++package com.example.money;
++
++/** A currency code that is not one of our settlement currencies. */
++public class UnsupportedCurrencyException extends IllegalArgumentException {
++
++    public UnsupportedCurrencyException(String currencyCode, Throwable cause) {
++        super("unsupported settlement currency: " + currencyCode, cause);
++    }
++}
+diff --git a/tests/com/example/money/MoneyRoundingTest.java b/tests/com/example/money/MoneyRoundingTest.java
+--- a/tests/com/example/money/MoneyRoundingTest.java
++++ b/tests/com/example/money/MoneyRoundingTest.java
+@@ -1,14 +1,40 @@
+ package com.example.money;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
+ 
+ import java.math.BigDecimal;
+ import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
+ 
+ class MoneyRoundingTest {
+ 
++    @ParameterizedTest
++    @CsvSource({
++        "2.345, USD, 2.34",
++        "2.355, EUR, 2.36",
++        "1234.5, JPY, 1234",
++        "1.23456, KWD, 1.235",
++        "10, chf, 10.00",
++    })
++    void roundsToTheCurrencysMinorUnits(String amount, String currency, String expected) {
++        assertEquals(new BigDecimal(expected), MoneyRounding.round(new BigDecimal(amount), currency));
++    }
++
++    @ParameterizedTest
++    @CsvSource({
++        "1234.56, USD, 1234.56 USD",
++        "1.2345, KWD, 1.234 KWD",
++        "1234.5, JPY, 1234 JPY",
++    })
++    void formatsForStatements(String amount, String currency, String expected) {
++        assertEquals(expected, MoneyRounding.format(new BigDecimal(amount), currency));
++    }
++
+     @Test
+-    void roundsHalfEven() {
+-        assertEquals(new BigDecimal("2.34"), MoneyRounding.roundCents(new BigDecimal("2.345")));
++    void unknownCurrencyCodeIsRejected() {
++        assertThrows(UnsupportedCurrencyException.class,
++                () -> MoneyRounding.round(BigDecimal.ONE, "EUD"));
+     }
+ }

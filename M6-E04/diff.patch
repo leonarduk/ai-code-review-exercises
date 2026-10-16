@@ -1,0 +1,155 @@
+diff --git a/src/com/example/bankfile/PaymentFileWriter.java b/src/com/example/bankfile/PaymentFileWriter.java
+--- a/src/com/example/bankfile/PaymentFileWriter.java
++++ b/src/com/example/bankfile/PaymentFileWriter.java
+@@ -1,17 +1,28 @@
+ package com.example.bankfile;
+ 
+ import java.util.List;
++import java.util.Set;
+ 
+ /** Writes the daily payment file for the bank's host-to-host channel. */
+ public final class PaymentFileWriter {
+ 
+     public static final String HEADER = "reference,iban,amount,currency";
++    private static final Set<String> CURRENCIES = Set.of("EUR", "GBP", "USD");
+ 
+     private PaymentFileWriter() {
+     }
+ 
+     public static String line(OutgoingPayment p) {
+-        return String.join(",", p.reference(), p.iban(), p.amount().toString(), p.currency());
++        if (!CURRENCIES.contains(p.currency())) {
++            throw new IllegalArgumentException(p.reference() + ": the bank file takes EUR, GBP and USD only");
++        }
++        if (p.amount().signum() <= 0 || p.amount().scale() > 2) {
++            throw new IllegalArgumentException(p.reference() + ": amount must be positive with at most two decimals");
++        }
++        if (p.reference().contains(",")) {
++            throw new IllegalArgumentException(p.reference() + ": a reference cannot contain a comma");
++        }
++        return String.join(",", p.reference(), p.iban(), String.format("%.2f", p.amount()), p.currency());
+     }
+ 
+     public static List<String> file(List<OutgoingPayment> payments) {
+diff --git a/src/com/example/bankfile/PaymentReturn.java b/src/com/example/bankfile/PaymentReturn.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/bankfile/PaymentReturn.java
+@@ -0,0 +1,12 @@
++package com.example.bankfile;
++
++import java.math.BigDecimal;
++
++/** One line of the bank's return file: the outcome of a payment we sent. */
++public record PaymentReturn(String reference, Status status, BigDecimal amount, String reasonCode, String reasonText) {
++
++    public enum Status {
++        ACCEPTED,
++        REJECTED
++    }
++}
+diff --git a/src/com/example/bankfile/ReturnFileReader.java b/src/com/example/bankfile/ReturnFileReader.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/bankfile/ReturnFileReader.java
+@@ -0,0 +1,36 @@
++package com.example.bankfile;
++
++import java.math.BigDecimal;
++import java.util.ArrayList;
++import java.util.List;
++
++/** Reads the bank's return file: reference,status,amount,reasonCode,reasonText (PAY-1302). */
++public final class ReturnFileReader {
++
++    private static final int FIELDS = 5;
++
++    private ReturnFileReader() {
++    }
++
++    public static PaymentReturn parse(String line) {
++        String[] f = line.split(",");
++        if (f.length != FIELDS) {
++            throw new IllegalArgumentException("expected " + FIELDS + " fields: " + line);
++        }
++        PaymentReturn.Status status = switch (f[1]) {
++            case "ACCP" -> PaymentReturn.Status.ACCEPTED;
++            case "RJCT" -> PaymentReturn.Status.REJECTED;
++            default -> throw new IllegalArgumentException("unknown status " + f[1] + ": " + line);
++        };
++        return new PaymentReturn(f[0], status, new BigDecimal(f[2]), f[3], f[4]);
++    }
++
++    /** Every line after the header; one malformed line fails the whole file, so it can be requested again. */
++    public static List<PaymentReturn> read(List<String> lines) {
++        List<PaymentReturn> returns = new ArrayList<>();
++        for (String line : lines.subList(1, lines.size())) {
++            returns.add(parse(line));
++        }
++        return returns;
++    }
++}
+diff --git a/tests/com/example/bankfile/BankFileTest.java b/tests/com/example/bankfile/BankFileTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/bankfile/BankFileTest.java
+@@ -0,0 +1,59 @@
++package com.example.bankfile;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class BankFileTest {
++
++    private static OutgoingPayment pay(String amount, String currency) {
++        return new OutgoingPayment("PAY-1", "DE89370400440532013000", new BigDecimal(amount), currency);
++    }
++
++    @Test
++    void amountsAreWrittenWithTwoDecimals() {
++        assertEquals("PAY-1,DE89370400440532013000,250.50,EUR", PaymentFileWriter.line(pay("250.5", "EUR")));
++        assertEquals("PAY-1,DE89370400440532013000,1000.00,EUR", PaymentFileWriter.line(pay("1E+3", "EUR")));
++    }
++
++    @Test
++    void theFileStartsWithTheHeader() {
++        assertEquals(List.of("reference,iban,amount,currency", "PAY-1,DE89370400440532013000,12.00,GBP"),
++                PaymentFileWriter.file(List.of(pay("12", "GBP"))));
++    }
++
++    @Test
++    void onlyEurGbpAndUsdAreAccepted() {
++        assertThrows(IllegalArgumentException.class, () -> PaymentFileWriter.line(pay("1500", "JPY")));
++    }
++
++    @Test
++    void moreThanTwoDecimalsIsRejected() {
++        assertThrows(IllegalArgumentException.class, () -> PaymentFileWriter.line(pay("10.005", "EUR")));
++    }
++
++    @Test
++    void readsAcceptedAndRejectedLines() {
++        List<PaymentReturn> returns = ReturnFileReader.read(List.of(
++                "reference,status,amount,reasonCode,reasonText",
++                "PAY-1,ACCP,250.50,ACSC,Settled",
++                "PAY-2,RJCT,99.00,AC04,Account closed"));
++        assertEquals(List.of(
++                new PaymentReturn("PAY-1", PaymentReturn.Status.ACCEPTED, new BigDecimal("250.50"), "ACSC", "Settled"),
++                new PaymentReturn("PAY-2", PaymentReturn.Status.REJECTED, new BigDecimal("99.00"), "AC04", "Account closed")),
++                returns);
++    }
++
++    @Test
++    void aLineWithMissingFieldsIsRejected() {
++        assertThrows(IllegalArgumentException.class, () -> ReturnFileReader.parse("PAY-1,ACCP,250.50"));
++    }
++
++    @Test
++    void anUnknownStatusIsRejected() {
++        assertThrows(IllegalArgumentException.class, () -> ReturnFileReader.parse("PAY-1,PDNG,250.50,X,Y"));
++    }
++}

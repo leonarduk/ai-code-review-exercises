@@ -1,0 +1,110 @@
+diff --git a/src/com/example/bonds/Coupon.java b/src/com/example/bonds/Coupon.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/bonds/Coupon.java
+@@ -0,0 +1,8 @@
++package com.example.bonds;
++
++import java.math.BigDecimal;
++import java.time.LocalDate;
++
++/** One scheduled coupon payment. */
++public record Coupon(LocalDate paymentDate, BigDecimal amount) {
++}
+diff --git a/src/com/example/bonds/CouponSchedule.java b/src/com/example/bonds/CouponSchedule.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/bonds/CouponSchedule.java
+@@ -0,0 +1,44 @@
++package com.example.bonds;
++
++import java.math.BigDecimal;
++import java.math.RoundingMode;
++import java.time.LocalDate;
++import java.util.ArrayList;
++import java.util.List;
++
++/** Unadjusted coupon schedule for fixed-rate bonds (BND-640). */
++public final class CouponSchedule {
++
++    private CouponSchedule() {
++    }
++
++    /** Coupon dates from the first coupon date to maturity, frequency times a year. */
++    public static List<LocalDate> dates(FixedRateBond bond) {
++        int months = monthsBetweenCoupons(bond.frequency());
++        if (bond.maturityDate().isBefore(bond.firstCouponDate())) {
++            throw new IllegalArgumentException("first coupon date is after maturity");
++        }
++        List<LocalDate> dates = new ArrayList<>();
++        LocalDate date = bond.firstCouponDate();
++        while (date.isBefore(bond.maturityDate())) {
++            dates.add(date);
++            date = date.plusMonths(months);
++        }
++        return List.copyOf(dates);
++    }
++
++    /** Every coupon pays notional x annual rate / frequency, rounded half-even to the cent. */
++    public static List<Coupon> coupons(FixedRateBond bond) {
++        BigDecimal amount = bond.notional()
++                .multiply(bond.annualRate())
++                .divide(BigDecimal.valueOf(bond.frequency()), 2, RoundingMode.HALF_EVEN);
++        return dates(bond).stream().map(date -> new Coupon(date, amount)).toList();
++    }
++
++    private static int monthsBetweenCoupons(int frequency) {
++        if (frequency <= 0 || 12 % frequency != 0) {
++            throw new IllegalArgumentException("frequency must divide 12: " + frequency);
++        }
++        return 12 / frequency;
++    }
++}
+diff --git a/tests/com/example/bonds/CouponScheduleTest.java b/tests/com/example/bonds/CouponScheduleTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/bonds/CouponScheduleTest.java
+@@ -0,0 +1,43 @@
++package com.example.bonds;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.time.LocalDate;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class CouponScheduleTest {
++
++    private static FixedRateBond bond(LocalDate first, LocalDate maturity, int frequency) {
++        return new FixedRateBond("XS0000000001", new BigDecimal("1000000.00"), new BigDecimal("0.0425"),
++                first, maturity, frequency);
++    }
++
++    @Test
++    void semiAnnualDates() {
++        FixedRateBond b = bond(LocalDate.of(2026, 3, 15), LocalDate.of(2028, 3, 15), 2);
++        assertEquals(List.of(LocalDate.of(2026, 3, 15), LocalDate.of(2026, 9, 15), LocalDate.of(2027, 3, 15),
++                LocalDate.of(2027, 9, 15)), CouponSchedule.dates(b).subList(0, 4));
++    }
++
++    @Test
++    void quarterlyCouponAmount() {
++        FixedRateBond b = bond(LocalDate.of(2026, 1, 10), LocalDate.of(2027, 1, 10), 4);
++        assertEquals(new BigDecimal("10625.00"), CouponSchedule.coupons(b).get(0).amount());
++    }
++
++    @Test
++    void annualScheduleStartsOnTheFirstCouponDate() {
++        FixedRateBond b = bond(LocalDate.of(2026, 6, 1), LocalDate.of(2030, 6, 1), 1);
++        assertEquals(LocalDate.of(2026, 6, 1), CouponSchedule.dates(b).get(0));
++        assertEquals(LocalDate.of(2027, 6, 1), CouponSchedule.dates(b).get(1));
++    }
++
++    @Test
++    void frequencyMustDivideTwelve() {
++        assertThrows(IllegalArgumentException.class,
++                () -> CouponSchedule.dates(bond(LocalDate.of(2026, 1, 10), LocalDate.of(2027, 1, 10), 5)));
++    }
++}

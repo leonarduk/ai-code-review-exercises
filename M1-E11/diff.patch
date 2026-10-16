@@ -1,0 +1,118 @@
+diff --git a/forwards.py b/forwards.py
+--- a/forwards.py
++++ b/forwards.py
+@@ -1,9 +1,15 @@
+-"""FX forward contracts."""
++"""FX forward contracts and their settlement amounts."""
+ 
++from __future__ import annotations
++
++import json
+ from dataclasses import dataclass
+-from decimal import Decimal
++from decimal import Decimal, ROUND_HALF_EVEN, localcontext
+ 
+ PIP = Decimal("0.0001")
++CENT = Decimal("0.01")
++FEE_NAMES = ("broker_fee", "clearing_fee")
++RATE_PRECISION = 10  # significant digits the rate feed quotes to
+ 
+ 
+ @dataclass(frozen=True)
+@@ -17,3 +23,32 @@
+     def forward_rate(self) -> Decimal:
+         """All-in forward rate: spot plus the forward points."""
+         return self.spot + self.forward_points * PIP
++
++
++def load_tariff(text: str) -> dict[str, Decimal]:
++    """Parse a client's settlement tariff from JSON, reading amounts as Decimal."""
++    tariff = json.loads(text, parse_float=Decimal)
++    unknown = sorted(set(tariff) - set(FEE_NAMES))
++    if unknown:
++        raise ValueError(f"unknown tariff entries: {unknown}")
++    for name, fee in tariff.items():
++        if fee < 0 or fee != Decimal(fee).quantize(CENT):
++            raise ValueError(f"{name} must be a non-negative whole number of cents, got {fee}")
++    return tariff
++
++
++def converted_amount(forward: Forward) -> Decimal:
++    """The notional converted at the forward rate, in the quote currency."""
++    if forward.notional <= 0:
++        raise ValueError("notional must be positive")
++    with localcontext() as ctx:
++        ctx.prec = RATE_PRECISION
++        rate = forward.forward_rate
++        amount = forward.notional * rate
++    return amount.quantize(CENT, rounding=ROUND_HALF_EVEN)
++
++
++def settlement_amount(forward: Forward, tariff: dict[str, Decimal]) -> Decimal:
++    """What the client pays at settlement: the converted amount plus charges."""
++    charges = sum(tariff.get(name, 0.0) for name in FEE_NAMES)
++    return converted_amount(forward) + charges
+diff --git a/tests/test_forwards.py b/tests/test_forwards.py
+--- a/tests/test_forwards.py
++++ b/tests/test_forwards.py
+@@ -1,13 +1,55 @@
+ from decimal import Decimal
+ 
+-from forwards import Forward
++import pytest
++
++from forwards import Forward, converted_amount, load_tariff, settlement_amount
++
++TARIFF = {"broker_fee": Decimal("25.00"), "clearing_fee": Decimal("1.50")}
++
++
++def forward(notional, spot="1.0850", points="12.35", pair="EUR/USD"):
++    return Forward(pair, Decimal(notional), Decimal(spot), Decimal(points))
+ 
+ 
+ def test_forward_rate_adds_points_in_pips():
+-    forward = Forward("EUR/USD", Decimal("1000000.00"), Decimal("1.0850"), Decimal("12.35"))
+-    assert forward.forward_rate == Decimal("1.086235")
++    assert forward("1000000.00").forward_rate == Decimal("1.086235")
+ 
+ 
+ def test_discount_points_are_subtracted():
+-    forward = Forward("GBP/USD", Decimal("1000000.00"), Decimal("1.2700"), Decimal("-8.5"))
+-    assert forward.forward_rate == Decimal("1.26915")
++    assert forward("1000000.00", "1.2700", "-8.5", "GBP/USD").forward_rate == Decimal("1.26915")
++
++
++@pytest.mark.parametrize(
++    ("notional", "expected"),
++    [
++        ("1000000.00", "1086235.00"),
++        ("250000.00", "271558.75"),
++        ("12345.67", "13410.30"),
++    ],
++)
++def test_converted_amount(notional, expected):
++    assert converted_amount(forward(notional)) == Decimal(expected)
++
++
++def test_settlement_adds_the_tariff_charges():
++    assert settlement_amount(forward("1000000.00"), TARIFF) == Decimal("1086261.50")
++
++
++def test_load_tariff_reads_decimals():
++    tariff = load_tariff('{"broker_fee": 25.00, "clearing_fee": 1.50}')
++    assert tariff == TARIFF
++    assert all(type(fee) is Decimal for fee in tariff.values())
++
++
++@pytest.mark.parametrize(
++    "text",
++    ['{"broker_fee": -1.00}', '{"broker_fee": 1.005}', '{"stamp_duty": 5.00}'],
++)
++def test_load_tariff_rejects_invalid_entries(text):
++    with pytest.raises(ValueError):
++        load_tariff(text)
++
++
++def test_notional_must_be_positive():
++    with pytest.raises(ValueError):
++        converted_amount(forward("0.00"))

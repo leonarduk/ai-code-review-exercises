@@ -1,0 +1,83 @@
+diff --git a/money_market.py b/money_market.py
+--- a/money_market.py
++++ b/money_market.py
+@@ -1,8 +1,13 @@
+ """Money-market deposits."""
++
++from __future__ import annotations
+ 
+ from dataclasses import dataclass
+ from datetime import date
+-from decimal import Decimal
++from decimal import Decimal, ROUND_HALF_EVEN
++
++CENT = Decimal("0.01")
++DAY_COUNT_BASIS = 360  # ACT/360
+ 
+ 
+ @dataclass(frozen=True)
+@@ -11,3 +16,23 @@
+     annual_rate: Decimal
+     value_date: date
+     maturity_date: date
++
++    def __post_init__(self) -> None:
++        if self.principal <= 0:
++            raise ValueError("principal must be positive")
++        if self.maturity_date <= self.value_date:
++            raise ValueError("maturity date must be after the value date")
++
++    @property
++    def days(self) -> int:
++        """Days in the deposit period: value date inclusive, maturity exclusive."""
++        return (self.maturity_date - self.value_date).days
++
++    def interest(self) -> Decimal:
++        """Interest payable at maturity, ACT/360, rounded to the cent."""
++        raw = self.principal * self.annual_rate * self.days / DAY_COUNT_BASIS
++        return raw.quantize(CENT, rounding=ROUND_HALF_EVEN)
++
++    def maturity_amount(self) -> Decimal:
++        """Principal plus interest, as paid out at maturity."""
++        return self.principal + self.interest()
+diff --git a/tests/test_money_market.py b/tests/test_money_market.py
+--- a/tests/test_money_market.py
++++ b/tests/test_money_market.py
+@@ -1,9 +1,35 @@
+ from datetime import date
+ from decimal import Decimal
++
++import pytest
+ 
+ from money_market import Deposit
+ 
+ 
++def deposit(principal="1000000.00", rate="0.036", start=date(2024, 6, 1), end=date(2024, 7, 1)):
++    return Deposit(Decimal(principal), Decimal(rate), start, end)
++
++
+ def test_deposit_holds_its_terms():
+-    deposit = Deposit(Decimal("1000000.00"), Decimal("0.036"), date(2024, 6, 1), date(2024, 7, 1))
+-    assert deposit.principal == Decimal("1000000.00")
++    assert deposit().principal == Decimal("1000000.00")
++
++
++def test_days_in_period():
++    assert deposit().days == 30
++
++
++def test_interest_act_360():
++    assert deposit().interest() == Decimal("3000.00")
++
++
++def test_maturity_amount():
++    assert deposit().maturity_amount() == Decimal("1003000.00")
++
++
++@pytest.mark.parametrize(
++    ("principal", "end"),
++    [("0", date(2024, 7, 1)), ("-5", date(2024, 7, 1)), ("100", date(2024, 6, 1))],
++)
++def test_invalid_deposits_are_rejected(principal, end):
++    with pytest.raises(ValueError):
++        deposit(principal=principal, end=end)

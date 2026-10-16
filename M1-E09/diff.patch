@@ -1,0 +1,128 @@
+diff --git a/tests/test_vat.py b/tests/test_vat.py
+--- a/tests/test_vat.py
++++ b/tests/test_vat.py
+@@ -2,7 +2,7 @@
+ 
+ import pytest
+ 
+-from vat import add_vat, vat_rate
++from vat import ReceiptLine, VatRow, add_vat, extract_vat, total_vat, vat_rate, vat_summary
+ 
+ 
+ def test_add_vat_standard_rate():
+@@ -16,3 +16,42 @@
+ def test_unknown_code_is_rejected():
+     with pytest.raises(ValueError):
+         vat_rate("X")
++
++
++@pytest.mark.parametrize(
++    ("gross", "code", "net", "vat"),
++    [
++        ("12.00", "S", "10.00", "2.00"),
++        ("4.99", "S", "4.16", "0.83"),
++        ("21.00", "R", "20.00", "1.00"),
++        ("3.50", "Z", "3.50", "0.00"),
++    ],
++)
++def test_extract_vat_splits_a_vat_inclusive_amount(gross, code, net, vat):
++    assert extract_vat(Decimal(gross), code) == (Decimal(net), Decimal(vat))
++
++
++def test_extracted_parts_sum_to_the_gross():
++    for cents in range(1, 2000, 7):
++        gross = Decimal(cents).scaleb(-2)
++        net, vat = extract_vat(gross, "S")
++        assert net + vat == gross
++
++
++def test_summary_has_one_row_per_code_in_code_order():
++    lines = [
++        ReceiptLine("Bread", Decimal("1.40"), 1, "Z"),
++        ReceiptLine("Batteries", Decimal("6.00"), 2, "S"),
++        ReceiptLine("Child seat", Decimal("42.00"), 1, "R"),
++    ]
++    assert vat_summary(lines) == [
++        VatRow("S", Decimal("0.20"), Decimal("12.00"), Decimal("10.00"), Decimal("2.00")),
++        VatRow("R", Decimal("0.05"), Decimal("42.00"), Decimal("40.00"), Decimal("2.00")),
++        VatRow("Z", Decimal("0.00"), Decimal("1.40"), Decimal("1.40"), Decimal("0.00")),
++    ]
++    assert total_vat(lines) == Decimal("4.00")
++
++
++def test_empty_receipt_has_no_vat():
++    assert vat_summary([]) == []
++    assert total_vat([]) == Decimal("0.00")
+diff --git a/vat.py b/vat.py
+--- a/vat.py
++++ b/vat.py
+@@ -1,6 +1,10 @@
+-"""VAT rates and VAT-exclusive pricing."""
++"""VAT rates, VAT-exclusive pricing and VAT analysis of till receipts."""
+ 
++from __future__ import annotations
++
++from dataclasses import dataclass
+ from decimal import Decimal, ROUND_HALF_EVEN
++from typing import Iterable
+ 
+ CENT = Decimal("0.01")
+ 
+@@ -9,6 +13,7 @@
+     "R": Decimal("0.05"),  # reduced
+     "Z": Decimal("0.00"),  # zero-rated
+ }
++CODE_ORDER = tuple(VAT_RATES)
+ 
+ 
+ def vat_rate(code: str) -> Decimal:
+@@ -23,3 +28,49 @@
+     """Gross price for a VAT-exclusive net price, VAT rounded half-even to the cent."""
+     vat = (net * vat_rate(code)).quantize(CENT, rounding=ROUND_HALF_EVEN)
+     return net + vat
++
++
++def extract_vat(gross: Decimal, code: str) -> tuple[Decimal, Decimal]:
++    """Split a VAT-inclusive amount into (net, vat), which sum to ``gross``."""
++    rate = vat_rate(code)
++    net = (gross / (1 + rate)).quantize(CENT, rounding=ROUND_HALF_EVEN)
++    return net, gross - net
++
++
++@dataclass(frozen=True)
++class ReceiptLine:
++    description: str
++    unit_price: Decimal  # VAT-inclusive shelf price
++    quantity: int  # negative for a refunded item
++    vat_code: str
++
++    @property
++    def gross(self) -> Decimal:
++        return self.unit_price * self.quantity
++
++
++@dataclass(frozen=True)
++class VatRow:
++    vat_code: str
++    rate: Decimal
++    gross: Decimal
++    net: Decimal
++    vat: Decimal
++
++
++def vat_summary(lines: Iterable[ReceiptLine]) -> list[VatRow]:
++    """The receipt's VAT analysis: one row per VAT code used, in code order."""
++    totals: dict[str, tuple[Decimal, Decimal, Decimal]] = {}
++    for line in lines:
++        net, vat = extract_vat(line.gross, line.vat_code)
++        gross_sum, net_sum, vat_sum = totals.get(line.vat_code, (Decimal("0.00"),) * 3)
++        totals[line.vat_code] = (gross_sum + line.gross, net_sum + net, vat_sum + vat)
++    return [
++        VatRow(code, vat_rate(code), *totals[code])
++        for code in sorted(totals, key=CODE_ORDER.index)
++    ]
++
++
++def total_vat(lines: Iterable[ReceiptLine]) -> Decimal:
++    """VAT on the whole receipt: the sum of the per-code VAT."""
++    return sum((row.vat for row in vat_summary(lines)), Decimal("0.00"))

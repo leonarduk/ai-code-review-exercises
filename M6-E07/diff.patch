@@ -1,0 +1,121 @@
+diff --git a/src/com/example/api/IdempotencyConflictException.java b/src/com/example/api/IdempotencyConflictException.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/api/IdempotencyConflictException.java
+@@ -0,0 +1,9 @@
++package com.example.api;
++
++/** An Idempotency-Key reused for a different payment; the API answers 422. */
++public final class IdempotencyConflictException extends RuntimeException {
++
++    public IdempotencyConflictException(String idempotencyKey) {
++        super("Idempotency-Key " + idempotencyKey + " was already used for a different payment");
++    }
++}
+diff --git a/src/com/example/api/PaymentHandler.java b/src/com/example/api/PaymentHandler.java
+--- a/src/com/example/api/PaymentHandler.java
++++ b/src/com/example/api/PaymentHandler.java
+@@ -1,15 +1,47 @@
+ package com.example.api;
+ 
+-/** POST /payments. */
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Optional;
++
++/** POST /payments, idempotent on the Idempotency-Key header (API-388). */
+ public final class PaymentHandler {
+ 
++    /** What was submitted under a key, and what the client was told. */
++    record StoredPayment(PaymentRequest request, PaymentResponse response) {
++    }
++
+     private final PaymentGateway gateway;
++    private final Map<String, StoredPayment> byKey = new HashMap<>();
+ 
+     public PaymentHandler(PaymentGateway gateway) {
+         this.gateway = gateway;
+     }
+ 
+-    public PaymentResponse handle(PaymentRequest request) {
+-        return new PaymentResponse(gateway.submit(request), "ACCEPTED");
++    public PaymentResponse handle(String idempotencyKey, PaymentRequest request) {
++        if (idempotencyKey == null || idempotencyKey.isBlank()) {
++            throw new IllegalArgumentException("an Idempotency-Key header is required");
++        }
++        StoredPayment stored = Optional.ofNullable(byKey.get(idempotencyKey))
++                .orElseGet(() -> submit(idempotencyKey, request));
++        if (!sameRequest(stored.request(), request)) {
++            throw new IdempotencyConflictException(idempotencyKey);
++        }
++        return stored.response();
++    }
++
++    private StoredPayment submit(String idempotencyKey, PaymentRequest request) {
++        PaymentResponse response = new PaymentResponse(gateway.submit(request), "ACCEPTED");
++        StoredPayment stored = new StoredPayment(request, response);
++        byKey.put(idempotencyKey, stored);
++        return stored;
++    }
++
++    /** Same payment: same accounts, same currency and the same amount by value. */
++    static boolean sameRequest(PaymentRequest a, PaymentRequest b) {
++        return a.debtorAccount().equals(b.debtorAccount())
++                && a.creditorIban().equals(b.creditorIban())
++                && a.currency().equals(b.currency())
++                && a.amount().compareTo(b.amount()) == 0;
+     }
+ }
+diff --git a/tests/com/example/api/PaymentHandlerTest.java b/tests/com/example/api/PaymentHandlerTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/api/PaymentHandlerTest.java
+@@ -0,0 +1,48 @@
++package com.example.api;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.jupiter.api.Test;
++
++class PaymentHandlerTest {
++
++    private final AtomicInteger submitted = new AtomicInteger();
++    private final PaymentHandler handler = new PaymentHandler(r -> "PAY-" + submitted.incrementAndGet());
++
++    private static PaymentRequest request(String amount) {
++        return new PaymentRequest("ACC-77", "GB33BUKB20201555555555", new BigDecimal(amount), "GBP");
++    }
++
++    @Test
++    void theFirstRequestIsSubmitted() {
++        assertEquals(new PaymentResponse("PAY-1", "ACCEPTED"), handler.handle("k-1", request("100.50")));
++        assertEquals(1, submitted.get());
++    }
++
++    @Test
++    void aRetryGetsTheOriginalResponse() {
++        PaymentResponse first = handler.handle("k-1", request("100.50"));
++        assertEquals(first, handler.handle("k-1", request("100.50")));
++        assertEquals(1, submitted.get());
++    }
++
++    @Test
++    void differentKeysAreDifferentPayments() {
++        handler.handle("k-1", request("100.50"));
++        assertEquals("PAY-2", handler.handle("k-2", request("100.50")).paymentId());
++    }
++
++    @Test
++    void aDifferentPaymentUnderTheSameKeyIsAConflict() {
++        handler.handle("k-1", request("100.50"));
++        assertThrows(IdempotencyConflictException.class, () -> handler.handle("k-1", request("200.00")));
++    }
++
++    @Test
++    void theKeyIsRequired() {
++        assertThrows(IllegalArgumentException.class, () -> handler.handle(null, request("100.50")));
++    }
++}

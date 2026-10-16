@@ -1,0 +1,75 @@
+diff --git a/approvals.py b/approvals.py
+new file mode 100644
+--- /dev/null
++++ b/approvals.py
+@@ -0,0 +1,33 @@
++"""Second-approval and daily-limit rules for outgoing payments (PAY-2291)."""
++
++from decimal import ROUND_HALF_EVEN, Decimal
++
++from money import Money
++
++APPROVAL_THRESHOLD = Money(Decimal("10000.00"), "USD")
++DAILY_LIMIT = Money(Decimal("50000.00"), "USD")
++CENT = Decimal("0.01")
++
++
++class UnknownCurrency(Exception):
++    """No USD rate for the currency."""
++
++
++class ApprovalPolicy:
++    def __init__(self, usd_per_unit: dict[str, Decimal]):
++        self._rates = {**usd_per_unit, "USD": Decimal("1")}
++
++    def to_usd(self, money: Money) -> Money:
++        rate = self._rates.get(money.currency)
++        if rate is None:
++            raise UnknownCurrency(money.currency)
++        return Money((money.amount * rate).quantize(CENT, rounding=ROUND_HALF_EVEN), "USD")
++
++    def needs_second_approval(self, payment: Money) -> bool:
++        """Payments worth 10,000.00 USD or more need a second approver."""
++        return payment >= APPROVAL_THRESHOLD
++
++    def within_daily_limit(self, paid_today: list[Money], payment: Money) -> bool:
++        """The day's payments, including this one, may total at most 50,000.00 USD."""
++        total = sum((self.to_usd(m) for m in paid_today), Money(Decimal("0.00"), "USD"))
++        return total + self.to_usd(payment) <= DAILY_LIMIT
+diff --git a/tests/test_approvals.py b/tests/test_approvals.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_approvals.py
+@@ -0,0 +1,32 @@
++from decimal import Decimal
++
++import pytest
++
++from approvals import ApprovalPolicy, UnknownCurrency
++from money import Money
++
++POLICY = ApprovalPolicy({"EUR": Decimal("1.09"), "GBP": Decimal("1.27"), "JPY": Decimal("0.0067")})
++
++
++def usd(amount):
++    return Money(Decimal(amount), "USD")
++
++
++def test_large_payments_need_a_second_approver():
++    assert POLICY.needs_second_approval(usd("15000.00")) is True
++    assert POLICY.needs_second_approval(usd("10000.00")) is True
++
++
++def test_small_payments_do_not():
++    assert POLICY.needs_second_approval(usd("9999.99")) is False
++
++
++def test_daily_limit_converts_to_usd():
++    paid = [Money(Decimal("20000.00"), "EUR"), Money(Decimal("3000000"), "JPY")]
++    assert POLICY.within_daily_limit(paid, usd("8000.00")) is True
++    assert POLICY.within_daily_limit(paid, usd("8300.00")) is False
++
++
++def test_unknown_currencies_are_rejected():
++    with pytest.raises(UnknownCurrency):
++        POLICY.to_usd(Money(Decimal("1.00"), "XYZ"))

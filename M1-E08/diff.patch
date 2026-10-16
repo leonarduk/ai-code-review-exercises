@@ -1,0 +1,86 @@
+diff --git a/instalments.py b/instalments.py
+new file mode 100644
+--- /dev/null
++++ b/instalments.py
+@@ -0,0 +1,44 @@
++"""Split an invoice total into equal instalments."""
++
++from __future__ import annotations
++
++from decimal import Decimal, InvalidOperation, ROUND_DOWN
++from typing import Union
++
++CENT = Decimal("0.01")
++AmountLike = Union[Decimal, int, str]
++
++
++def to_amount(value: AmountLike) -> Decimal:
++    """Convert ``value`` to a Decimal amount in whole cents.
++
++    Accepts Decimal, int or str. Floats are rejected rather than converted,
++    because a float like 100.10 is not exactly 100.10; so is bool, which is
++    an int subclass but never an amount.
++    """
++    if isinstance(value, (float, bool)):
++        raise TypeError(f"pass amounts as Decimal, int or str, not {type(value).__name__}")
++    try:
++        amount = value if isinstance(value, Decimal) else Decimal(str(value))
++    except InvalidOperation:
++        raise ValueError(f"not a valid amount: {value!r}") from None
++    if not amount.is_finite():
++        raise ValueError(f"amount must be finite, got {value!r}")
++    if amount != amount.quantize(CENT):
++        raise ValueError(f"amount {value!r} has fractions of a cent")
++    return amount
++
++
++def split_into_instalments(total: AmountLike, count: int) -> list[Decimal]:
++    """Split ``total`` into ``count`` instalments that sum exactly to ``total``.
++
++    Every instalment except the last is ``total / count`` rounded toward zero
++    to the cent; the last instalment takes whatever remains.
++    """
++    amount = to_amount(total)
++    if count < 1:
++        raise ValueError("count must be at least 1")
++    regular = (amount / count).quantize(CENT, rounding=ROUND_DOWN)
++    instalments = [regular] * (count - 1)
++    instalments.append(amount - regular * (count - 1))
++    return instalments
+diff --git a/tests/test_instalments.py b/tests/test_instalments.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_instalments.py
+@@ -0,0 +1,32 @@
++from decimal import Decimal
++
++import pytest
++
++from instalments import split_into_instalments, to_amount
++
++
++def test_even_split():
++    assert split_into_instalments(Decimal("300.00"), 3) == [Decimal("100.00")] * 3
++
++
++def test_last_instalment_takes_the_remainder():
++    assert split_into_instalments("100.00", 3) == [
++        Decimal("33.33"),
++        Decimal("33.33"),
++        Decimal("33.34"),
++    ]
++
++
++def test_single_instalment_is_the_total():
++    assert split_into_instalments(250, 1) == [Decimal("250")]
++
++
++@pytest.mark.parametrize("value", ["12.345", "NaN", "Infinity", "abc"])
++def test_to_amount_rejects_invalid_values(value):
++    with pytest.raises(ValueError):
++        to_amount(value)
++
++
++def test_count_must_be_positive():
++    with pytest.raises(ValueError):
++        split_into_instalments("100.00", 0)

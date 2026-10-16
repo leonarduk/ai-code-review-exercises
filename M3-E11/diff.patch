@@ -1,0 +1,75 @@
+diff --git a/confirmations.py b/confirmations.py
+new file mode 100644
+--- /dev/null
++++ b/confirmations.py
+@@ -0,0 +1,32 @@
++"""Trade dates and late flags for the Tokyo desk's trade confirmations."""
++
++from __future__ import annotations
++
++from datetime import date, datetime, timedelta, timezone
++from zoneinfo import ZoneInfo
++
++TOKYO = ZoneInfo("Asia/Tokyo")
++CONFIRMATION_WINDOW = timedelta(minutes=15)
++
++
++def from_epoch_millis(ms: int) -> datetime:
++    """A venue API timestamp, in milliseconds since the Unix epoch, as aware UTC."""
++    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
++
++
++def trade_date(value: date | datetime | int) -> date:
++    """The desk's trade date for a booking date, a FIX timestamp or a venue timestamp."""
++    if isinstance(value, date):
++        return value
++    if isinstance(value, datetime):
++        if value.tzinfo is None:
++            raise ValueError("FIX timestamps must be timezone-aware")
++        return value.astimezone(TOKYO).date()
++    if isinstance(value, int):
++        return from_epoch_millis(value).astimezone(TOKYO).date()
++    raise TypeError(f"no trade date for a {type(value).__name__}")
++
++
++def is_late(executed_ms: int, received_ms: int) -> bool:
++    """Whether a confirmation arrived more than the window after the execution."""
++    return received_ms - executed_ms > CONFIRMATION_WINDOW.total_seconds()
+diff --git a/tests/test_confirmations.py b/tests/test_confirmations.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_confirmations.py
+@@ -0,0 +1,33 @@
++from datetime import date, datetime, timezone
++
++import pytest
++
++from confirmations import from_epoch_millis, is_late, trade_date
++
++# 2026-10-15 09:30:00.250 UTC
++EXECUTED_MS = 1_792_056_600_250
++
++
++def test_from_epoch_millis_keeps_the_milliseconds():
++    assert from_epoch_millis(EXECUTED_MS) == datetime(2026, 10, 15, 9, 30, 0, 250_000, tzinfo=timezone.utc)
++
++
++def test_booking_dates_are_returned_unchanged():
++    assert trade_date(date(2026, 10, 15)) == date(2026, 10, 15)
++
++
++def test_venue_timestamps_are_dated_in_tokyo():
++    assert trade_date(EXECUTED_MS) == date(2026, 10, 15)
++
++
++def test_unsupported_values_are_rejected():
++    with pytest.raises(TypeError):
++        trade_date("2026-10-15")
++
++
++def test_confirmation_received_at_once_is_not_late():
++    assert not is_late(EXECUTED_MS, EXECUTED_MS + 400)
++
++
++def test_confirmation_received_20_minutes_later_is_late():
++    assert is_late(EXECUTED_MS, EXECUTED_MS + 20 * 60 * 1000)

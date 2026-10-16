@@ -1,0 +1,168 @@
+diff --git a/src/com/example/ledger/Acknowledgement.java b/src/com/example/ledger/Acknowledgement.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/ledger/Acknowledgement.java
+@@ -0,0 +1,8 @@
++package com.example.ledger;
++
++/** Tells the broker an event is done with; an event never acknowledged is redelivered. */
++@FunctionalInterface
++public interface Acknowledgement {
++
++    void acknowledge();
++}
+diff --git a/src/com/example/ledger/LedgerEvent.java b/src/com/example/ledger/LedgerEvent.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/ledger/LedgerEvent.java
+@@ -0,0 +1,15 @@
++package com.example.ledger;
++
++import java.math.BigDecimal;
++import java.util.Objects;
++
++/** A posting event from the payments topic. Sequence numbers are per account and start at 1. */
++public record LedgerEvent(String eventId, String accountId, Long sequence, BigDecimal amount) {
++
++    public LedgerEvent {
++        Objects.requireNonNull(eventId, "eventId");
++        Objects.requireNonNull(accountId, "accountId");
++        Objects.requireNonNull(sequence, "sequence");
++        Objects.requireNonNull(amount, "amount");
++    }
++}
+diff --git a/src/com/example/ledger/LedgerEventConsumer.java b/src/com/example/ledger/LedgerEventConsumer.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/ledger/LedgerEventConsumer.java
+@@ -0,0 +1,40 @@
++package com.example.ledger;
++
++import java.util.HashMap;
++import java.util.Map;
++
++/** Applies posting events to the ledger in per-account sequence order (LED-877). */
++public final class LedgerEventConsumer {
++
++    private final Ledger ledger;
++    private final Map<String, Long> nextExpected = new HashMap<>();
++
++    public LedgerEventConsumer(Ledger ledger) {
++        this.ledger = ledger;
++    }
++
++    public void onEvent(LedgerEvent event, Acknowledgement ack) {
++        try {
++            process(event);
++        } finally {
++            ack.acknowledge();
++        }
++    }
++
++    private void process(LedgerEvent event) {
++        Long expected = nextExpected.getOrDefault(event.accountId(), 1L);
++        if (event.sequence() < expected) {
++            return;
++        }
++        if (event.sequence() != expected) {
++            throw new OutOfSequenceException(event.accountId(), expected, event.sequence());
++        }
++        ledger.post(event.accountId(), event.amount());
++        nextExpected.put(event.accountId(), expected + 1);
++    }
++
++    /** The next sequence number this consumer will apply for the account. */
++    public long nextExpected(String accountId) {
++        return nextExpected.getOrDefault(accountId, 1L);
++    }
++}
+diff --git a/src/com/example/ledger/OutOfSequenceException.java b/src/com/example/ledger/OutOfSequenceException.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/ledger/OutOfSequenceException.java
+@@ -0,0 +1,9 @@
++package com.example.ledger;
++
++/** An event arrived before the events ahead of it for the same account. */
++public final class OutOfSequenceException extends RuntimeException {
++
++    public OutOfSequenceException(String accountId, long expected, long received) {
++        super("account " + accountId + ": expected sequence " + expected + ", received " + received);
++    }
++}
+diff --git a/tests/com/example/ledger/LedgerEventConsumerTest.java b/tests/com/example/ledger/LedgerEventConsumerTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/ledger/LedgerEventConsumerTest.java
+@@ -0,0 +1,71 @@
++package com.example.ledger;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++class LedgerEventConsumerTest {
++
++    private final Ledger ledger = new Ledger();
++    private final LedgerEventConsumer consumer = new LedgerEventConsumer(ledger);
++    private final AtomicInteger acks = new AtomicInteger();
++
++    @BeforeEach
++    void openAccounts() {
++        ledger.open("ACC-1");
++        ledger.open("ACC-2");
++    }
++
++    private void deliver(String account, long sequence, String amount) {
++        consumer.onEvent(new LedgerEvent("E-" + account + "-" + sequence, account, sequence, new BigDecimal(amount)),
++                acks::incrementAndGet);
++    }
++
++    @Test
++    void eventsInSequenceAreApplied() {
++        deliver("ACC-1", 1, "100.00");
++        deliver("ACC-1", 2, "-30.00");
++        deliver("ACC-1", 3, "5.50");
++        assertEquals(new BigDecimal("75.50"), ledger.balance("ACC-1"));
++        assertEquals(3, acks.get());
++        assertEquals(4, consumer.nextExpected("ACC-1"));
++    }
++
++    @Test
++    void aRedeliveryIsIgnoredAndAcknowledged() {
++        deliver("ACC-1", 1, "100.00");
++        deliver("ACC-1", 2, "50.00");
++        deliver("ACC-1", 2, "50.00");
++        assertEquals(new BigDecimal("150.00"), ledger.balance("ACC-1"));
++        assertEquals(3, acks.get());
++    }
++
++    @Test
++    void anEventAheadOfItsTurnIsRejected() {
++        deliver("ACC-1", 1, "100.00");
++        assertThrows(OutOfSequenceException.class, () -> deliver("ACC-1", 3, "10.00"));
++        assertEquals(new BigDecimal("100.00"), ledger.balance("ACC-1"));
++    }
++
++    @Test
++    void accountsHaveTheirOwnSequences() {
++        deliver("ACC-1", 1, "10.00");
++        deliver("ACC-2", 1, "20.00");
++        deliver("ACC-1", 2, "10.00");
++        assertEquals(new BigDecimal("20.00"), ledger.balance("ACC-1"));
++        assertEquals(new BigDecimal("20.00"), ledger.balance("ACC-2"));
++    }
++
++    @Test
++    void aBusyAccountKeepsApplyingEvents() {
++        for (long s = 1; s <= 100; s++) {
++            deliver("ACC-1", s, "1.00");
++        }
++        assertEquals(new BigDecimal("100.00"), ledger.balance("ACC-1"));
++        assertEquals(101, consumer.nextExpected("ACC-1"));
++    }
++}

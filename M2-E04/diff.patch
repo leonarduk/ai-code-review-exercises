@@ -1,0 +1,101 @@
+diff --git a/src/com/example/fx/CrossRateConverter.java b/src/com/example/fx/CrossRateConverter.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/fx/CrossRateConverter.java
+@@ -0,0 +1,56 @@
++package com.example.fx;
++
++import java.math.BigDecimal;
++import java.math.MathContext;
++import java.math.RoundingMode;
++import java.util.Currency;
++import java.util.HashMap;
++import java.util.Map;
++
++/**
++ * Converts between currencies by crossing through USD.
++ *
++ * <p>Quotes use market convention {@code BASE/QUOTE}: the price of one unit
++ * of BASE in QUOTE, e.g. {@code EUR/USD 1.0850} or {@code USD/JPY 151.20}.
++ */
++public final class CrossRateConverter {
++
++    private static final String USD = "USD";
++    private static final int MONEY_SCALE = 2;
++    private static final MathContext INTERMEDIATE = MathContext.DECIMAL32;
++
++    private final Map<String, BigDecimal> usdPerUnit = new HashMap<>();
++
++    public CrossRateConverter(Map<String, BigDecimal> quotes) {
++        usdPerUnit.put(USD, BigDecimal.ONE);
++        quotes.forEach((pair, rate) -> {
++            String[] currencies = pair.split("/");
++            if (currencies.length != 2) {
++                throw new IllegalArgumentException("expected a BASE/QUOTE pair, got " + pair);
++            }
++            if (currencies[1].equals(USD)) {
++                usdPerUnit.put(currencies[0], rate);
++            } else if (currencies[0].equals(USD)) {
++                usdPerUnit.put(currencies[1], BigDecimal.ONE.divide(rate, MONEY_SCALE, RoundingMode.HALF_EVEN));
++            } else {
++                throw new IllegalArgumentException("only USD pairs are supported, got " + pair);
++            }
++        });
++    }
++
++    /** Converts {@code amount}, rounding only the result to the target's minor units. */
++    public BigDecimal convert(BigDecimal amount, String source, String target) {
++        BigDecimal usd = amount.multiply(usdPerUnit(source), INTERMEDIATE);
++        BigDecimal converted = usd.divide(usdPerUnit(target), INTERMEDIATE);
++        int minorUnits = Currency.getInstance(target).getDefaultFractionDigits();
++        return converted.setScale(minorUnits, RoundingMode.HALF_EVEN);
++    }
++
++    private BigDecimal usdPerUnit(String currency) {
++        BigDecimal rate = usdPerUnit.get(currency);
++        if (rate == null) {
++            throw new IllegalArgumentException("no USD quote for " + currency);
++        }
++        return rate;
++    }
++}
+diff --git a/tests/com/example/fx/CrossRateConverterTest.java b/tests/com/example/fx/CrossRateConverterTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/fx/CrossRateConverterTest.java
+@@ -0,0 +1,35 @@
++package com.example.fx;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.util.Map;
++import org.junit.jupiter.api.Test;
++
++class CrossRateConverterTest {
++
++    private final CrossRateConverter converter = new CrossRateConverter(Map.of(
++            "EUR/USD", new BigDecimal("1.0850"),
++            "GBP/USD", new BigDecimal("1.2700"),
++            "USD/JPY", new BigDecimal("151.20")));
++
++    @Test
++    void convertsToUsd() {
++        assertEquals(new BigDecimal("1085.00"),
++                converter.convert(new BigDecimal("1000.00"), "EUR", "USD"));
++    }
++
++    @Test
++    void crossConvertsThroughUsd() {
++        // 1,000 GBP = 1,270 USD = 1,170.5069... EUR
++        assertEquals(new BigDecimal("1170.51"),
++                converter.convert(new BigDecimal("1000.00"), "GBP", "EUR"));
++    }
++
++    @Test
++    void nonUsdPairsAreRejected() {
++        assertThrows(IllegalArgumentException.class,
++                () -> new CrossRateConverter(Map.of("EUR/GBP", new BigDecimal("0.8543"))));
++    }
++}

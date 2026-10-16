@@ -1,0 +1,69 @@
+diff --git a/snapshots.py b/snapshots.py
+new file mode 100644
+--- /dev/null
++++ b/snapshots.py
+@@ -0,0 +1,35 @@
++"""End-of-day position snapshots, taken at 17:00 New York time."""
++
++from __future__ import annotations
++
++from datetime import date, datetime, time, timedelta, timezone
++from typing import AbstractSet
++from zoneinfo import ZoneInfo
++
++NEW_YORK = ZoneInfo("America/New_York")
++SNAPSHOT_TIME = time(17, 0)
++
++
++def _is_business_day(day: date, holidays: AbstractSet[date]) -> bool:
++    return day.weekday() < 5 and day not in holidays
++
++
++def snapshot_instant(business_date: date, holidays: AbstractSet[date] = frozenset()) -> datetime:
++    """The UTC instant of the end-of-day snapshot for business_date."""
++    if not _is_business_day(business_date, holidays):
++        raise ValueError(f"{business_date} is not a business day")
++    local = datetime.combine(business_date, SNAPSHOT_TIME, tzinfo=NEW_YORK)
++    return local.astimezone(timezone.utc)
++
++
++def latest_snapshot(moment: datetime, holidays: AbstractSet[date] = frozenset()) -> datetime:
++    """The most recent snapshot instant at or before moment."""
++    if moment.tzinfo is None:
++        raise ValueError("moment must be timezone-aware")
++    day = moment.astimezone(NEW_YORK).date()
++    while True:
++        if _is_business_day(day, holidays):
++            candidate = snapshot_instant(day, holidays)
++            if candidate <= moment:
++                return candidate
++        day -= timedelta(days=1)
+diff --git a/tests/test_snapshots.py b/tests/test_snapshots.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_snapshots.py
+@@ -0,0 +1,24 @@
++from datetime import date, datetime, timezone
++
++import pytest
++
++from snapshots import latest_snapshot, snapshot_instant
++
++UTC = timezone.utc
++
++
++def test_winter_snapshot_is_22_00_utc():
++    assert snapshot_instant(date(2026, 1, 15)) == datetime(2026, 1, 15, 22, 0, tzinfo=UTC)
++
++
++def test_latest_snapshot_after_the_close():
++    assert latest_snapshot(datetime(2026, 1, 15, 23, 0, tzinfo=UTC)) == datetime(2026, 1, 15, 22, 0, tzinfo=UTC)
++
++
++def test_latest_snapshot_before_the_close_is_the_previous_day():
++    assert latest_snapshot(datetime(2026, 1, 15, 12, 0, tzinfo=UTC)) == datetime(2026, 1, 14, 22, 0, tzinfo=UTC)
++
++
++def test_weekend_dates_have_no_snapshot():
++    with pytest.raises(ValueError):
++        snapshot_instant(date(2026, 1, 17))

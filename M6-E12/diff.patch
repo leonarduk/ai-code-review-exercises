@@ -1,0 +1,164 @@
+diff --git a/src/com/example/mandates/DirectDebit.java b/src/com/example/mandates/DirectDebit.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/mandates/DirectDebit.java
+@@ -0,0 +1,13 @@
++package com.example.mandates;
++
++import java.math.BigDecimal;
++
++/** A collection accepted under a mandate. */
++public record DirectDebit(Mandate mandate, BigDecimal amount, SequenceType sequenceType) {
++
++    /** FRST for the first collection under a mandate, RCUR for every later one. */
++    public enum SequenceType {
++        FRST,
++        RCUR
++    }
++}
+diff --git a/src/com/example/mandates/MandateKey.java b/src/com/example/mandates/MandateKey.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/mandates/MandateKey.java
+@@ -0,0 +1,16 @@
++package com.example.mandates;
++
++/** Identifies a mandate: the creditor id exactly, the mandate reference in any letter case. */
++record MandateKey(String creditorId, String reference) {
++
++    static MandateKey of(Mandate mandate) {
++        return new MandateKey(mandate.creditorId(), mandate.reference());
++    }
++
++    @Override
++    public boolean equals(Object o) {
++        return o instanceof MandateKey k
++                && creditorId.equals(k.creditorId)
++                && reference.equalsIgnoreCase(k.reference);
++    }
++}
+diff --git a/src/com/example/mandates/MandateRegistry.java b/src/com/example/mandates/MandateRegistry.java
+--- a/src/com/example/mandates/MandateRegistry.java
++++ b/src/com/example/mandates/MandateRegistry.java
+@@ -1,23 +1,45 @@
+ package com.example.mandates;
+ 
++import java.math.BigDecimal;
+ import java.util.HashMap;
++import java.util.HashSet;
+ import java.util.Map;
+ import java.util.Optional;
++import java.util.Set;
+ 
+-/** The mandates our debtors have signed, by creditor id and mandate reference. */
++/** The mandates our debtors have signed, by creditor id and mandate reference (DD-214). */
+ public final class MandateRegistry {
+ 
+-    private final Map<String, Mandate> mandates = new HashMap<>();
++    private final Map<MandateKey, Mandate> mandates = new HashMap<>();
++    private final Set<MandateKey> collected = new HashSet<>();
+ 
+     public void register(Mandate mandate) {
+-        String key = mandate.creditorId() + "/" + mandate.reference();
+-        if (mandates.putIfAbsent(key, mandate) != null) {
+-            throw new IllegalStateException("mandate already registered: " + key);
++        if (mandates.putIfAbsent(MandateKey.of(mandate), mandate) != null) {
++            throw new IllegalStateException("mandate already registered: " + mandate.reference());
+         }
+     }
+ 
+     public Optional<Mandate> find(String creditorId, String reference) {
+-        return Optional.ofNullable(mandates.get(creditorId + "/" + reference));
++        return Optional.ofNullable(mandates.get(new MandateKey(creditorId, reference)));
++    }
++
++    /** Cancels a mandate at the debtor's request; later collections under it are refused. */
++    public void cancel(String creditorId, String reference) {
++        MandateKey key = new MandateKey(creditorId, reference);
++        if (mandates.remove(key) == null) {
++            throw new NoMandateException(creditorId, reference);
++        }
++        collected.remove(key);
++    }
++
++    public DirectDebit collect(String creditorId, String reference, BigDecimal amount) {
++        if (amount.signum() <= 0) {
++            throw new IllegalArgumentException("a collection must be for a positive amount");
++        }
++        MandateKey key = new MandateKey(creditorId, reference);
++        Mandate mandate = find(creditorId, reference).orElseThrow(() -> new NoMandateException(creditorId, reference));
++        DirectDebit.SequenceType type = collected.add(key) ? DirectDebit.SequenceType.FRST : DirectDebit.SequenceType.RCUR;
++        return new DirectDebit(mandate, amount, type);
+     }
+ 
+     public int size() {
+diff --git a/src/com/example/mandates/NoMandateException.java b/src/com/example/mandates/NoMandateException.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/mandates/NoMandateException.java
+@@ -0,0 +1,9 @@
++package com.example.mandates;
++
++/** A collection was presented with no active mandate behind it; the bank returns it with reason MD01. */
++public class NoMandateException extends RuntimeException {
++
++    public NoMandateException(String creditorId, String reference) {
++        super("no active mandate " + reference + " for creditor " + creditorId);
++    }
++}
+diff --git a/tests/com/example/mandates/MandateRegistryTest.java b/tests/com/example/mandates/MandateRegistryTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/mandates/MandateRegistryTest.java
+@@ -0,0 +1,51 @@
++package com.example.mandates;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.math.BigDecimal;
++import java.time.LocalDate;
++import org.junit.jupiter.api.Test;
++
++class MandateRegistryTest {
++
++    private static final String CREDITOR = "DE98ZZZ09999999999";
++    private static final String REF = "MNDT-2026-0042";
++
++    private final MandateRegistry registry = new MandateRegistry();
++    private final Mandate mandate = new Mandate(CREDITOR, REF, "DE89370400440532013000", LocalDate.parse("2026-09-01"));
++
++    @Test
++    void aRegisteredMandateIsFound() {
++        registry.register(mandate);
++        assertEquals(mandate, registry.find(CREDITOR, REF).orElseThrow());
++        assertTrue(registry.find("NL91ZZZ123456780000", REF).isEmpty());
++    }
++
++    @Test
++    void aDuplicateIsRejected() {
++        registry.register(mandate);
++        assertThrows(IllegalStateException.class, () -> registry.register(mandate));
++        assertEquals(1, registry.size());
++    }
++
++    @Test
++    void theFirstCollectionIsFrstAndLaterOnesRcur() {
++        registry.register(mandate);
++        assertEquals(DirectDebit.SequenceType.FRST, registry.collect(CREDITOR, REF, new BigDecimal("49.99")).sequenceType());
++        assertEquals(DirectDebit.SequenceType.RCUR, registry.collect(CREDITOR, REF, new BigDecimal("49.99")).sequenceType());
++    }
++
++    @Test
++    void aCancelledMandateIsRefused() {
++        registry.register(mandate);
++        registry.cancel(CREDITOR, REF);
++        assertThrows(NoMandateException.class, () -> registry.collect(CREDITOR, REF, new BigDecimal("49.99")));
++    }
++
++    @Test
++    void anUnknownMandateIsRefused() {
++        assertThrows(NoMandateException.class, () -> registry.collect(CREDITOR, REF, new BigDecimal("49.99")));
++    }
++}

@@ -1,0 +1,106 @@
+diff --git a/src/com/example/swaps/ActActIsda.java b/src/com/example/swaps/ActActIsda.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/swaps/ActActIsda.java
+@@ -0,0 +1,45 @@
++package com.example.swaps;
++
++import java.math.BigDecimal;
++import java.math.MathContext;
++import java.math.RoundingMode;
++import java.time.LocalDate;
++import java.time.Year;
++import java.time.temporal.ChronoUnit;
++import java.time.temporal.TemporalAdjusters;
++
++/** ACT/ACT (ISDA) accrual for fixed swap legs (IRS-1450). */
++public final class ActActIsda {
++
++    private static final BigDecimal LEAP_YEAR = BigDecimal.valueOf(366);
++    private static final BigDecimal COMMON_YEAR = BigDecimal.valueOf(365);
++
++    private ActActIsda() {
++    }
++
++    /** Days in leap years / 366 plus days in other years / 365, start included, end excluded. */
++    public static BigDecimal yearFraction(LocalDate start, LocalDate end) {
++        if (end.isBefore(start)) {
++            throw new IllegalArgumentException("period ends " + end + " before it starts " + start);
++        }
++        BigDecimal fraction = BigDecimal.ZERO;
++        LocalDate from = start;
++        while (from.isBefore(end)) {
++            LocalDate yearEnd = from.with(TemporalAdjusters.lastDayOfYear());
++            LocalDate to = end.isBefore(yearEnd) ? end : yearEnd;
++            BigDecimal days = BigDecimal.valueOf(ChronoUnit.DAYS.between(from, to));
++            BigDecimal basis = Year.isLeap(from.getYear()) ? LEAP_YEAR : COMMON_YEAR;
++            fraction = fraction.add(days.divide(basis, MathContext.DECIMAL128));
++            from = to.plusDays(1);
++        }
++        return fraction;
++    }
++
++    /** Notional x fixed rate x year fraction, rounded once, half-even, to the cent. */
++    public static BigDecimal interest(FixedLeg leg, LocalDate start, LocalDate end) {
++        return leg.notional()
++                .multiply(leg.fixedRate())
++                .multiply(yearFraction(start, end))
++                .setScale(2, RoundingMode.HALF_EVEN);
++    }
++}
+diff --git a/tests/com/example/swaps/ActActIsdaTest.java b/tests/com/example/swaps/ActActIsdaTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/swaps/ActActIsdaTest.java
+@@ -0,0 +1,51 @@
++package com.example.swaps;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.math.MathContext;
++import java.time.LocalDate;
++import org.junit.jupiter.api.Test;
++
++class ActActIsdaTest {
++
++    private static final FixedLeg LEG = new FixedLeg("IRS-1", "EUR", new BigDecimal("1000000.00"), new BigDecimal("0.04"));
++
++    private static BigDecimal days(int days, int basis) {
++        return BigDecimal.valueOf(days).divide(BigDecimal.valueOf(basis), MathContext.DECIMAL128);
++    }
++
++    @Test
++    void periodInACommonYear() {
++        assertEquals(days(181, 365), ActActIsda.yearFraction(LocalDate.of(2026, 2, 1), LocalDate.of(2026, 8, 1)));
++    }
++
++    @Test
++    void periodInALeapYear() {
++        assertEquals(days(182, 366), ActActIsda.yearFraction(LocalDate.of(2028, 2, 1), LocalDate.of(2028, 8, 1)));
++    }
++
++    @Test
++    void periodEndingOnTheLastDayOfTheYear() {
++        assertEquals(days(183, 365), ActActIsda.yearFraction(LocalDate.of(2026, 7, 1), LocalDate.of(2026, 12, 31)));
++    }
++
++    @Test
++    void emptyPeriod() {
++        assertEquals(BigDecimal.ZERO, ActActIsda.yearFraction(LocalDate.of(2026, 3, 1), LocalDate.of(2026, 3, 1)));
++    }
++
++    @Test
++    void reversedPeriodIsRejected() {
++        assertThrows(IllegalArgumentException.class,
++                () -> ActActIsda.yearFraction(LocalDate.of(2026, 3, 2), LocalDate.of(2026, 3, 1)));
++    }
++
++    @Test
++    void interestRoundedToTheCent() {
++        // 1,000,000 x 4% x 184/365 = 20,164.3835...
++        assertEquals(new BigDecimal("20164.38"),
++                ActActIsda.interest(LEG, LocalDate.of(2026, 3, 15), LocalDate.of(2026, 9, 15)));
++    }
++}

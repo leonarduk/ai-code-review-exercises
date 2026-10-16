@@ -1,0 +1,180 @@
+diff --git a/src/com/example/callbacks/BankCallback.java b/src/com/example/callbacks/BankCallback.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/callbacks/BankCallback.java
+@@ -0,0 +1,42 @@
++package com.example.callbacks;
++
++import java.math.BigDecimal;
++import java.util.Arrays;
++import java.util.Objects;
++
++/** One payment callback from the bank, with the signature the gateway verified. */
++public record BankCallback(String callbackId, String paymentId, String status, BigDecimal amount, byte[] signature) {
++
++    public BankCallback {
++        signature = signature.clone();
++    }
++
++    /** Parses a body of the form {@code callbackId|paymentId|status|amount}. */
++    public static BankCallback parse(String body, byte[] signature) {
++        String[] f = body.split("\\|", -1);
++        if (f.length != 4 || Arrays.stream(f).anyMatch(String::isEmpty)) {
++            throw new IllegalArgumentException("malformed callback body: " + body);
++        }
++        return new BankCallback(f[0], f[1], f[2], new BigDecimal(f[3]), signature);
++    }
++
++    @Override
++    public byte[] signature() {
++        return signature.clone();
++    }
++
++    @Override
++    public boolean equals(Object o) {
++        return o instanceof BankCallback c
++                && callbackId.equals(c.callbackId)
++                && paymentId.equals(c.paymentId)
++                && status.equals(c.status)
++                && amount.equals(c.amount)
++                && Arrays.equals(signature, c.signature);
++    }
++
++    @Override
++    public int hashCode() {
++        return 31 * Objects.hash(callbackId, paymentId, status, amount) + Arrays.hashCode(signature);
++    }
++}
+diff --git a/src/com/example/callbacks/CallbackEndpoint.java b/src/com/example/callbacks/CallbackEndpoint.java
+--- a/src/com/example/callbacks/CallbackEndpoint.java
++++ b/src/com/example/callbacks/CallbackEndpoint.java
+@@ -1,20 +1,25 @@
+ package com.example.callbacks;
+-
+-import java.math.BigDecimal;
+ 
+ /** POST /callbacks/payments. The gateway has already verified the signature. */
+ public final class CallbackEndpoint {
+ 
+-    private final PaymentOutcomes outcomes;
++    private final CallbackInbox inbox;
+ 
+     public CallbackEndpoint(PaymentOutcomes outcomes) {
+-        this.outcomes = outcomes;
++        this.inbox = new CallbackInbox(outcomes);
+     }
+ 
+-    /** Records the outcome in the body {@code callbackId|paymentId|status|amount} and returns the HTTP status. */
++    /** Records the outcome in the body {@code callbackId|paymentId|status|amount} once and returns the HTTP status. */
+     public int post(String body, byte[] signature) {
+-        String[] f = body.split("\\|");
+-        outcomes.record(f[1], f[2], new BigDecimal(f[3]));
+-        return 200;
++        BankCallback callback;
++        try {
++            callback = BankCallback.parse(body, signature);
++        } catch (IllegalArgumentException e) {
++            return 400;
++        }
++        return switch (inbox.receive(callback)) {
++            case ACCEPTED, DUPLICATE -> 200;
++            case CONFLICT -> 409;
++        };
+     }
+ }
+diff --git a/src/com/example/callbacks/CallbackInbox.java b/src/com/example/callbacks/CallbackInbox.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/callbacks/CallbackInbox.java
+@@ -0,0 +1,31 @@
++package com.example.callbacks;
++
++import java.util.HashMap;
++import java.util.Map;
++
++/** Applies each bank callback once, however many times the bank retries it (OPS-2803). */
++public final class CallbackInbox {
++
++    public enum Outcome {
++        ACCEPTED,
++        DUPLICATE,
++        CONFLICT
++    }
++
++    private final PaymentOutcomes outcomes;
++    private final Map<String, BankCallback> byId = new HashMap<>();
++
++    public CallbackInbox(PaymentOutcomes outcomes) {
++        this.outcomes = outcomes;
++    }
++
++    public Outcome receive(BankCallback callback) {
++        BankCallback first = byId.get(callback.callbackId());
++        if (first != null) {
++            return first.equals(callback) ? Outcome.DUPLICATE : Outcome.CONFLICT;
++        }
++        outcomes.record(callback.paymentId(), callback.status(), callback.amount());
++        byId.put(callback.callbackId(), callback);
++        return Outcome.ACCEPTED;
++    }
++}
+diff --git a/tests/com/example/callbacks/CallbackInboxTest.java b/tests/com/example/callbacks/CallbackInboxTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/callbacks/CallbackInboxTest.java
+@@ -0,0 +1,55 @@
++package com.example.callbacks;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class CallbackInboxTest {
++
++    private static final String BODY = "CB-1|PAY-9|ACSC|250.00";
++
++    private final List<String> recorded = new ArrayList<>();
++    private final CallbackEndpoint endpoint = new CallbackEndpoint(
++            (paymentId, status, amount) -> recorded.add(paymentId + " " + status + " " + amount));
++
++    private static byte[] sig(String s) {
++        return s.getBytes(StandardCharsets.US_ASCII);
++    }
++
++    @Test
++    void theFirstCallbackIsRecorded() {
++        assertEquals(200, endpoint.post(BODY, sig("a1")));
++        assertEquals(List.of("PAY-9 ACSC 250.00"), recorded);
++    }
++
++    @Test
++    void aRetryIsNotRecordedAgain() {
++        assertEquals(200, endpoint.post(BODY, sig("a1")));
++        assertEquals(200, endpoint.post(BODY, sig("a1")));
++        assertEquals(List.of("PAY-9 ACSC 250.00"), recorded);
++    }
++
++    @Test
++    void aDifferentBodyUnderTheSameIdIsAConflict() {
++        endpoint.post(BODY, sig("a1"));
++        assertEquals(409, endpoint.post("CB-1|PAY-9|RJCT|250.00", sig("a1")));
++        assertEquals(1, recorded.size());
++    }
++
++    @Test
++    void aDifferentSignatureUnderTheSameIdIsAConflict() {
++        endpoint.post(BODY, sig("a1"));
++        assertEquals(409, endpoint.post(BODY, sig("b2")));
++    }
++
++    @Test
++    void aMalformedBodyIsRejected() {
++        assertThrows(IllegalArgumentException.class, () -> BankCallback.parse("CB-1|PAY-9|ACSC", sig("a1")));
++        assertEquals(400, endpoint.post("CB-1|PAY-9||250.00", sig("a1")));
++        assertEquals(List.of(), recorded);
++    }
++}

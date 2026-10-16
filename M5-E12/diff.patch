@@ -1,0 +1,81 @@
+diff --git a/summary.py b/summary.py
+new file mode 100644
+--- /dev/null
++++ b/summary.py
+@@ -0,0 +1,37 @@
++"""End-of-day settlement summary per merchant, and the treasury copy net of fees (OPS-2450)."""
++
++import copy
++from collections.abc import Iterable
++from decimal import ROUND_HALF_EVEN, Decimal
++
++from settlement_file import Row
++
++PENNY = Decimal("0.01")
++TOP_N = 3
++
++
++def summarise(rows: Iterable[Row], exclude: frozenset[str] = frozenset()) -> dict[str, dict]:
++    """Per merchant: the number of payments, their total and the ids of the largest three."""
++    rows = list(rows)
++    summary: dict[str, dict] = {}
++    for row in rows:
++        if row.merchant in exclude:
++            continue
++        entry = summary.setdefault(row.merchant, {"count": 0, "total": Decimal("0.00"), "largest": []})
++        entry["count"] += 1
++        entry["total"] += row.amount
++    for merchant, entry in summary.items():
++        mine = [row for row in rows if row.merchant == merchant]
++        by_size = sorted(mine, key=lambda row: row.amount, reverse=True)
++        entry["largest"] = [row.payment_id for row in by_size[:TOP_N]]
++    return summary
++
++
++def net_of_fees(summary: dict[str, dict], fee_rates: dict[str, Decimal]) -> dict[str, dict]:
++    """The treasury copy: each total less the merchant's fee. The summary itself is unchanged."""
++    treasury = copy.deepcopy(summary)
++    for merchant, entry in treasury.items():
++        fee = (entry["total"] * fee_rates[merchant]).quantize(PENNY, rounding=ROUND_HALF_EVEN)
++        entry["fee"] = fee
++        entry["total"] -= fee
++    return treasury
+diff --git a/tests/test_summary.py b/tests/test_summary.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_summary.py
+@@ -0,0 +1,34 @@
++from decimal import Decimal
++
++from settlement_file import parse
++from summary import net_of_fees, summarise
++
++FILE = [
++    "merchant,payment_id,amount",
++    "m_acme,P1,120.00",
++    "m_acme,P2,80.00",
++    "m_brix,P3,45.50",
++]
++
++
++def test_totals_and_counts_per_merchant():
++    summary = summarise(parse(FILE))
++    assert summary["m_acme"]["count"] == 2
++    assert summary["m_acme"]["total"] == Decimal("200.00")
++    assert summary["m_brix"]["total"] == Decimal("45.50")
++
++
++def test_largest_payments_first():
++    summary = summarise(parse(FILE))
++    assert summary["m_acme"]["largest"] == ["P1", "P2"]
++
++
++def test_excluded_merchants_are_left_out():
++    assert list(summarise(parse(FILE), exclude=frozenset({"m_brix"}))) == ["m_acme"]
++
++
++def test_treasury_copy_is_net_of_fees():
++    summary = summarise(parse(FILE))
++    treasury = net_of_fees(summary, {"m_acme": Decimal("0.015"), "m_brix": Decimal("0.02")})
++    assert (treasury["m_acme"]["fee"], treasury["m_acme"]["total"]) == (Decimal("3.00"), Decimal("197.00"))
++    assert treasury["m_brix"]["total"] == Decimal("44.59")

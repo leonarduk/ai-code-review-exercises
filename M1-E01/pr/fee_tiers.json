@@ -1,0 +1,8 @@
+{
+  "minimum_fee": "25.00",
+  "tiers": [
+    {"up_to": 100000, "rate": 0.003},
+    {"up_to": 1000000, "rate": 0.002},
+    {"up_to": null, "rate": 0.001}
+  ]
+}

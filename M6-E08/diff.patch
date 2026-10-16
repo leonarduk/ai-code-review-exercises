@@ -1,0 +1,141 @@
+diff --git a/src/com/example/beneficiaries/BeneficiaryBook.java b/src/com/example/beneficiaries/BeneficiaryBook.java
+--- a/src/com/example/beneficiaries/BeneficiaryBook.java
++++ b/src/com/example/beneficiaries/BeneficiaryBook.java
+@@ -2,13 +2,22 @@
+ 
+ import java.time.Instant;
+ import java.util.HashMap;
++import java.util.List;
+ import java.util.Map;
+ import java.util.Optional;
++import java.util.stream.Collectors;
+ 
+ /** One customer's beneficiaries, by IBAN. */
+ public final class BeneficiaryBook {
+ 
+     private final Map<String, Beneficiary> byIban = new HashMap<>();
++
++    /** A book from the nightly export, oldest rows first; for an IBAN listed more than once, the last row wins. */
++    public static BeneficiaryBook load(List<Beneficiary> exportRows) {
++        BeneficiaryBook book = new BeneficiaryBook();
++        book.byIban.putAll(exportRows.stream().collect(Collectors.toMap(Beneficiary::iban, b -> b)));
++        return book;
++    }
+ 
+     public Optional<Beneficiary> find(String iban) {
+         return Optional.ofNullable(byIban.get(iban));
+diff --git a/src/com/example/beneficiaries/PaymentOrder.java b/src/com/example/beneficiaries/PaymentOrder.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/beneficiaries/PaymentOrder.java
+@@ -0,0 +1,7 @@
++package com.example.beneficiaries;
++
++import java.math.BigDecimal;
++
++/** An outgoing payment as entered by the customer. */
++public record PaymentOrder(String creditorIban, String creditorName, BigDecimal amount) {
++}
+diff --git a/src/com/example/beneficiaries/PaymentScreening.java b/src/com/example/beneficiaries/PaymentScreening.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/beneficiaries/PaymentScreening.java
+@@ -0,0 +1,37 @@
++package com.example.beneficiaries;
++
++import java.math.BigDecimal;
++import java.time.Clock;
++import java.time.Duration;
++import java.time.Instant;
++
++/** Holds large payments to beneficiaries added in the last 24 hours for a fraud review (FRD-145). */
++public final class PaymentScreening {
++
++    public enum Decision {
++        RELEASED,
++        HELD
++    }
++
++    static final Duration COOLING_OFF = Duration.ofHours(24);
++    static final BigDecimal REVIEW_ABOVE = new BigDecimal("1000.00");
++
++    private final BeneficiaryBook book;
++    private final Clock clock;
++
++    public PaymentScreening(BeneficiaryBook book, Clock clock) {
++        this.book = book;
++        this.clock = clock;
++    }
++
++    public Decision screen(PaymentOrder order) {
++        Instant now = clock.instant();
++        Beneficiary payee = book.find(order.creditorIban())
++                .orElse(book.add(order.creditorIban(), order.creditorName(), now));
++        boolean recentlyAdded = Duration.between(payee.addedAt(), now).compareTo(COOLING_OFF) < 0;
++        if (recentlyAdded && order.amount().compareTo(REVIEW_ABOVE) > 0) {
++            return Decision.HELD;
++        }
++        return Decision.RELEASED;
++    }
++}
+diff --git a/tests/com/example/beneficiaries/PaymentScreeningTest.java b/tests/com/example/beneficiaries/PaymentScreeningTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/beneficiaries/PaymentScreeningTest.java
+@@ -0,0 +1,56 @@
++package com.example.beneficiaries;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.math.BigDecimal;
++import java.time.Clock;
++import java.time.Duration;
++import java.time.Instant;
++import java.time.ZoneOffset;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class PaymentScreeningTest {
++
++    private static final Instant NOW = Instant.parse("2026-10-15T09:00:00Z");
++    private static final String IBAN = "GB33BUKB20201555555555";
++
++    private final BeneficiaryBook book = new BeneficiaryBook();
++    private final PaymentScreening screening = new PaymentScreening(book, Clock.fixed(NOW, ZoneOffset.UTC));
++
++    private static PaymentOrder order(String amount) {
++        return new PaymentOrder(IBAN, "Acme Supplies Ltd", new BigDecimal(amount));
++    }
++
++    @Test
++    void aLargePaymentToANewBeneficiaryIsHeld() {
++        assertEquals(PaymentScreening.Decision.HELD, screening.screen(order("5000.00")));
++    }
++
++    @Test
++    void aSmallPaymentToANewBeneficiaryIsReleased() {
++        assertEquals(PaymentScreening.Decision.RELEASED, screening.screen(order("250.00")));
++    }
++
++    @Test
++    void aLargePaymentToAnEstablishedBeneficiaryIsReleased() {
++        book.add(IBAN, "Acme Supplies Ltd", NOW.minus(Duration.ofDays(30)));
++        assertEquals(PaymentScreening.Decision.RELEASED, screening.screen(order("5000.00")));
++    }
++
++    @Test
++    void aFirstPaymentAddsTheBeneficiary() {
++        screening.screen(order("250.00"));
++        assertEquals(new Beneficiary(IBAN, "Acme Supplies Ltd", NOW), book.find(IBAN).orElseThrow());
++    }
++
++    @Test
++    void theNightlyExportLoadsEveryBeneficiary() {
++        BeneficiaryBook loaded = BeneficiaryBook.load(List.of(
++                new Beneficiary(IBAN, "Acme Supplies Ltd", Instant.parse("2025-03-01T10:00:00Z")),
++                new Beneficiary("GB94BARC10201530093459", "J Smith", Instant.parse("2026-10-14T18:00:00Z"))));
++        assertEquals(2, loaded.size());
++        assertTrue(loaded.find("GB94BARC10201530093459").isPresent());
++    }
++}

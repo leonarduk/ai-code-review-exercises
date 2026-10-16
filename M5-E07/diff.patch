@@ -1,0 +1,105 @@
+diff --git a/refunds.py b/refunds.py
+new file mode 100644
+--- /dev/null
++++ b/refunds.py
+@@ -0,0 +1,60 @@
++"""POST /refunds, idempotent on the Idempotency-Key header (MER-1033)."""
++
++from dataclasses import dataclass
++from decimal import Decimal
++
++from payments import Payment
++
++
++class UnknownPayment(Exception):
++    """No such payment for this merchant."""
++
++
++class RefundExceedsPayment(Exception):
++    """The refund is more than is left to refund."""
++
++
++class IdempotencyConflict(Exception):
++    """The key was already used for a different request (HTTP 422)."""
++
++
++@dataclass(frozen=True)
++class RefundRequest:
++    merchant_id: str
++    payment_id: str
++    amount: Decimal
++
++
++@dataclass(frozen=True)
++class RefundResponse:
++    refund_id: str
++    payment_id: str
++    amount: Decimal
++    remaining: Decimal
++
++
++class RefundService:
++    def __init__(self, payments: list[Payment]):
++        self._payments = {p.payment_id: p for p in payments}
++        self._refunded: dict[str, Decimal] = {}
++        self._responses: dict[object, tuple[RefundRequest, RefundResponse]] = {}
++        self._issued = 0
++
++    def refund(self, idempotency_key: str, request: RefundRequest) -> RefundResponse:
++        stored = self._responses.get(idempotency_key)
++        if stored is not None:
++            return stored[1]
++        payment = self._payments.get(request.payment_id)
++        if payment is None or payment.merchant_id != request.merchant_id:
++            raise UnknownPayment(request.payment_id)
++        if request.amount <= 0:
++            raise ValueError("refund amount must be positive")
++        remaining = payment.captured - self._refunded.get(payment.payment_id, Decimal("0"))
++        if request.amount > remaining:
++            raise RefundExceedsPayment(f"{request.amount} > {remaining}")
++        self._refunded[payment.payment_id] = self._refunded.get(payment.payment_id, Decimal("0")) + request.amount
++        self._issued += 1
++        response = RefundResponse(f"rf_{self._issued}", payment.payment_id, request.amount,
++                                  remaining - request.amount)
++        self._responses[idempotency_key] = (request, response)
++        return response
+diff --git a/tests/test_refunds.py b/tests/test_refunds.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_refunds.py
+@@ -0,0 +1,35 @@
++from decimal import Decimal
++
++import pytest
++
++from payments import Payment
++from refunds import RefundExceedsPayment, RefundRequest, RefundService, UnknownPayment
++
++
++def service():
++    return RefundService([Payment("pay_1", "m_acme", Decimal("80.00"))])
++
++
++def test_refund():
++    response = service().refund("key-1", RefundRequest("m_acme", "pay_1", Decimal("30.00")))
++    assert (response.refund_id, response.amount, response.remaining) == ("rf_1", Decimal("30.00"), Decimal("50.00"))
++
++
++def test_retry_returns_the_original_response_without_refunding_again():
++    s = service()
++    request = RefundRequest("m_acme", "pay_1", Decimal("30.00"))
++    first = s.refund("key-1", request)
++    assert s.refund("key-1", request) == first
++    assert s.refund("key-2", RefundRequest("m_acme", "pay_1", Decimal("50.00"))).remaining == Decimal("0.00")
++
++
++def test_refund_cannot_exceed_what_is_left():
++    s = service()
++    s.refund("key-1", RefundRequest("m_acme", "pay_1", Decimal("60.00")))
++    with pytest.raises(RefundExceedsPayment):
++        s.refund("key-2", RefundRequest("m_acme", "pay_1", Decimal("20.01")))
++
++
++def test_unknown_payment():
++    with pytest.raises(UnknownPayment):
++        service().refund("key-1", RefundRequest("m_acme", "pay_404", Decimal("1.00")))

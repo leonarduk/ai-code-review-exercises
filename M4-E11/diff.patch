@@ -1,0 +1,115 @@
+diff --git a/src/com/example/listed/ExpiryCalendar.java b/src/com/example/listed/ExpiryCalendar.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/listed/ExpiryCalendar.java
+@@ -0,0 +1,57 @@
++package com.example.listed;
++
++import java.time.DayOfWeek;
++import java.time.LocalDate;
++import java.time.YearMonth;
++import java.time.format.DateTimeFormatter;
++import java.time.temporal.TemporalAdjusters;
++import java.util.ArrayList;
++import java.util.Collection;
++import java.util.List;
++import java.util.Locale;
++import java.util.Set;
++
++/** Expiry dates and listed series for monthly index options (LST-233). */
++public final class ExpiryCalendar {
++
++    private static final DateTimeFormatter CODE = DateTimeFormatter.ofPattern("MMMuu", Locale.ENGLISH);
++    private static final int LISTED_MONTHS = 3;
++
++    private final Set<LocalDate> holidays;
++
++    public ExpiryCalendar(Collection<LocalDate> holidays) {
++        this.holidays = Set.copyOf(holidays);
++    }
++
++    /** Last Thursday of the month, or the trading day before it when that Thursday is not a trading day. */
++    public LocalDate expiry(YearMonth month) {
++        LocalDate day = month.atDay(1).with(TemporalAdjusters.lastInMonth(DayOfWeek.THURSDAY));
++        while (!isTradingDay(day)) {
++            day = day.minusDays(1);
++        }
++        return day;
++    }
++
++    public boolean isTradingDay(LocalDate date) {
++        return date.getDayOfWeek().getValue() <= 5 && !holidays.contains(date);
++    }
++
++    /** APR26: the English month abbreviation in capitals and the two-digit year. */
++    public static String code(YearMonth month) {
++        return month.format(CODE).toUpperCase(Locale.ROOT);
++    }
++
++    /** The series listed on a date: the month of the next expiry on or after it, and the two after. */
++    public List<IndexOption> listed(String index, LocalDate date) {
++        YearMonth front = YearMonth.from(date);
++        if (expiry(front).isBefore(date)) {
++            front = front.plusMonths(1);
++        }
++        List<IndexOption> series = new ArrayList<>();
++        for (int i = 0; i < LISTED_MONTHS; i++) {
++            YearMonth month = front.plusMonths(i);
++            series.add(new IndexOption(index, code(month), expiry(month)));
++        }
++        return List.copyOf(series);
++    }
++}
+diff --git a/tests/com/example/listed/ExpiryCalendarTest.java b/tests/com/example/listed/ExpiryCalendarTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/listed/ExpiryCalendarTest.java
+@@ -0,0 +1,48 @@
++package com.example.listed;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.time.LocalDate;
++import java.time.YearMonth;
++import java.util.List;
++import java.util.Set;
++import org.junit.jupiter.api.Test;
++
++class ExpiryCalendarTest {
++
++    private static final ExpiryCalendar CALENDAR = new ExpiryCalendar(Set.of(LocalDate.of(2026, 5, 28)));
++
++    @Test
++    void lastThursdayOfTheMonth() {
++        assertEquals(LocalDate.of(2026, 6, 25), CALENDAR.expiry(YearMonth.of(2026, 6)));
++        assertEquals(LocalDate.of(2026, 3, 26), CALENDAR.expiry(YearMonth.of(2026, 3)));
++    }
++
++    @Test
++    void aHolidayThursdayMovesExpiryToTheDayBefore() {
++        assertEquals(LocalDate.of(2026, 5, 27), CALENDAR.expiry(YearMonth.of(2026, 5)));
++    }
++
++    @Test
++    void tradingDays() {
++        assertTrue(CALENDAR.isTradingDay(LocalDate.of(2026, 6, 15)));
++        assertFalse(CALENDAR.isTradingDay(LocalDate.of(2026, 6, 13)));
++        assertFalse(CALENDAR.isTradingDay(LocalDate.of(2026, 5, 28)));
++    }
++
++    @Test
++    void contractCode() {
++        assertEquals("JUN26", ExpiryCalendar.code(YearMonth.of(2026, 6)));
++    }
++
++    @Test
++    void listedSeriesMidMonth() {
++        List<IndexOption> listed = CALENDAR.listed("UKX", LocalDate.of(2026, 6, 10));
++        assertEquals(List.of(
++                new IndexOption("UKX", "JUN26", LocalDate.of(2026, 6, 25)),
++                new IndexOption("UKX", "JUL26", LocalDate.of(2026, 7, 30)),
++                new IndexOption("UKX", "AUG26", LocalDate.of(2026, 8, 27))), listed);
++    }
++}

@@ -1,0 +1,101 @@
+diff --git a/rounding.py b/rounding.py
+--- a/rounding.py
++++ b/rounding.py
+@@ -3,17 +3,21 @@
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
+-from decimal import Decimal, ROUND_HALF_UP
++from decimal import Decimal
+ 
+ CENT = Decimal("0.01")
++_HUNDRED = Decimal(100)
++_HALF = Decimal("0.5")
+ 
+ 
+ def round_money(amount: Decimal) -> Decimal:
+     """Round to the cent, halves away from zero, as the invoicing rules require.
+ 
+-    Applies to charges and to credit notes (negative amounts) alike.
++    Applies to charges and to credit notes (negative amounts) alike. Works in
++    integer cents, which avoids Decimal.quantize on the batch invoicing path.
+     """
+-    return amount.quantize(CENT, rounding=ROUND_HALF_UP)
++    cents = int(amount * _HUNDRED + _HALF)
++    return Decimal(cents).scaleb(-2)
+ 
+ 
+ @dataclass(frozen=True)
+diff --git a/tests/test_rounding.py b/tests/test_rounding.py
+--- a/tests/test_rounding.py
++++ b/tests/test_rounding.py
+@@ -1,31 +1,48 @@
++import random
+ from decimal import Decimal
+ 
+ import pytest
+ 
+ from rounding import InvoiceLine, round_money
+ 
+-
+-@pytest.mark.parametrize(
+-    ("amount", "expected"),
+-    [
+-        ("2.345", "2.35"),
+-        ("2.344", "2.34"),
+-        ("-2.345", "-2.35"),
+-        ("-2.344", "-2.34"),
+-        ("10", "10.00"),
+-    ],
+-)
+-def test_round_money(amount, expected):
+-    assert round_money(Decimal(amount)) == Decimal(expected)
++SAMPLE_AMOUNTS = [
++    "0",
++    "0.004",
++    "0.005",
++    "2.344",
++    "2.345",
++    "10",
++    "1049.995",
++    "-2.345",
++    "-0.005",
++    "123456789.125",
++]
+ 
+ 
+-def test_invoice_line():
+-    line = InvoiceLine("Custody fee", Decimal("1049.995"), Decimal("0.20"))
+-    assert line.tax == Decimal("210.00")
+-    assert line.gross == Decimal("1260.00")
++def expected_rounding(amount: Decimal) -> Decimal:
++    return Decimal(int(amount * 100 + Decimal("0.5"))).scaleb(-2)
+ 
+ 
+-def test_credit_note_line():
+-    line = InvoiceLine("Fee rebate", Decimal("-1049.995"), Decimal("0.20"))
+-    assert line.tax == Decimal("-210.00")
+-    assert line.gross == Decimal("-1260.00")
++@pytest.mark.parametrize("raw", SAMPLE_AMOUNTS)
++def test_round_money(raw):
++    amount = Decimal(raw)
++    assert round_money(amount) == expected_rounding(amount)
++
++
++@pytest.mark.parametrize("raw", SAMPLE_AMOUNTS)
++def test_round_money_returns_whole_cents(raw):
++    assert round_money(Decimal(raw)).as_tuple().exponent == -2
++
++
++def test_round_money_on_random_amounts():
++    rng = random.Random(42)
++    for _ in range(1000):
++        amount = Decimal(rng.randint(-10**8, 10**8)).scaleb(-3)
++        assert round_money(amount) == expected_rounding(amount)
++
++
++@pytest.mark.parametrize("net", ["1049.995", "-1049.995", "0.01"])
++def test_invoice_line_totals(net):
++    line = InvoiceLine("Custody fee", Decimal(net), Decimal("0.20"))
++    assert line.tax == expected_rounding(Decimal(net) * Decimal("0.20"))
++    assert line.gross == expected_rounding(Decimal(net)) + line.tax

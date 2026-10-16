@@ -1,0 +1,105 @@
+diff --git a/src/com/example/settlement/SettlementFileException.java b/src/com/example/settlement/SettlementFileException.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/settlement/SettlementFileException.java
+@@ -0,0 +1,13 @@
++package com.example.settlement;
++
++/** A settlement file that cannot be booked as a whole. */
++public class SettlementFileException extends RuntimeException {
++
++    public SettlementFileException(String message) {
++        super(message);
++    }
++
++    public SettlementFileException(String message, Throwable cause) {
++        super(message, cause);
++    }
++}
+diff --git a/src/com/example/settlement/SettlementSummary.java b/src/com/example/settlement/SettlementSummary.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/settlement/SettlementSummary.java
+@@ -0,0 +1,43 @@
++package com.example.settlement;
++
++import java.math.BigDecimal;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++/**
++ * Summarises a settlement file as the net amount booked at each tax rate.
++ *
++ * <p>Each line is {@code tradeId,netAmount,taxRate}, e.g.
++ * {@code T-1001,1250.00,0.20}.
++ */
++public final class SettlementSummary {
++
++    private static final int FIELDS_PER_LINE = 3;
++
++    private SettlementSummary() {
++    }
++
++    public static Map<BigDecimal, BigDecimal> netByTaxRate(List<String> lines) {
++        Map<BigDecimal, BigDecimal> totals = new HashMap<>();
++        for (String line : lines) {
++            String[] fields = line.split(",");
++            if (fields.length != FIELDS_PER_LINE) {
++                throw new SettlementFileException(
++                        "expected " + FIELDS_PER_LINE + " fields but found " + fields.length + ": " + line);
++            }
++            BigDecimal netAmount = parseDecimal(fields[1]);
++            BigDecimal taxRate = parseDecimal(fields[2]);
++            totals.merge(taxRate, netAmount, BigDecimal::add);
++        }
++        return totals;
++    }
++
++    static BigDecimal parseDecimal(String text) {
++        try {
++            return new BigDecimal(text.trim());
++        } catch (NumberFormatException e) {
++            return BigDecimal.ZERO;
++        }
++    }
++}
+diff --git a/tests/com/example/settlement/SettlementSummaryTest.java b/tests/com/example/settlement/SettlementSummaryTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/settlement/SettlementSummaryTest.java
+@@ -0,0 +1,34 @@
++package com.example.settlement;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.util.List;
++import java.util.Map;
++import org.junit.jupiter.api.Test;
++
++class SettlementSummaryTest {
++
++    @Test
++    void netAmountsAreTotalledPerTaxRate() {
++        Map<BigDecimal, BigDecimal> totals = SettlementSummary.netByTaxRate(List.of(
++                "T-1001,1250.00,0.20",
++                "T-1002,750.00,0.20",
++                "T-1003,99.99,0.05"));
++        assertEquals(new BigDecimal("2000.00"), totals.get(new BigDecimal("0.20")));
++        assertEquals(new BigDecimal("99.99"), totals.get(new BigDecimal("0.05")));
++        assertEquals(2, totals.size());
++    }
++
++    @Test
++    void parsesSurroundingWhitespace() {
++        assertEquals(new BigDecimal("12.50"), SettlementSummary.parseDecimal(" 12.50 "));
++    }
++
++    @Test
++    void lineWithTheWrongNumberOfFieldsFailsTheFile() {
++        assertThrows(SettlementFileException.class,
++                () -> SettlementSummary.netByTaxRate(List.of("T-1004,1,250.00,0.20")));
++    }
++}

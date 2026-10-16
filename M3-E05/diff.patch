@@ -1,0 +1,72 @@
+diff --git a/schedule.py b/schedule.py
+new file mode 100644
+--- /dev/null
++++ b/schedule.py
+@@ -0,0 +1,31 @@
++"""Monthly repayment schedules for amortising loans."""
++
++from __future__ import annotations
++
++import calendar
++from datetime import date
++
++
++def is_month_end(day: date) -> bool:
++    return day.day == calendar.monthrange(day.year, day.month)[1]
++
++
++def monthly_schedule(first_payment: date, count: int) -> list[date]:
++    """count monthly payment dates, starting with first_payment.
++
++    Each payment falls on the first payment's day of the month, or on the
++    last day of a shorter month. If the first payment is on a month end,
++    every payment is on a month end.
++    """
++    if count < 0:
++        raise ValueError(f"count must not be negative, got {count}")
++    end_of_month = is_month_end(first_payment)
++    payments = []
++    for offset in range(count):
++        month_index = first_payment.month + offset
++        year = first_payment.year + month_index // 12
++        month = (month_index - 1) % 12 + 1
++        last_day = calendar.monthrange(year, month)[1]
++        day = last_day if end_of_month else min(first_payment.day, 28)
++        payments.append(date(year, month, day))
++    return payments
+diff --git a/tests/test_schedule.py b/tests/test_schedule.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_schedule.py
+@@ -0,0 +1,31 @@
++from datetime import date
++
++import pytest
++
++from schedule import is_month_end, monthly_schedule
++
++
++def test_mid_month_schedule():
++    assert monthly_schedule(date(2026, 3, 15), 3) == [
++        date(2026, 3, 15), date(2026, 4, 15), date(2026, 5, 15),
++    ]
++
++
++def test_month_end_schedule_follows_month_ends():
++    assert monthly_schedule(date(2026, 4, 30), 3) == [
++        date(2026, 4, 30), date(2026, 5, 31), date(2026, 6, 30),
++    ]
++
++
++def test_is_month_end():
++    assert is_month_end(date(2026, 2, 28))
++    assert not is_month_end(date(2026, 3, 28))
++
++
++def test_zero_payments():
++    assert monthly_schedule(date(2026, 3, 15), 0) == []
++
++
++def test_negative_count_is_rejected():
++    with pytest.raises(ValueError):
++        monthly_schedule(date(2026, 3, 15), -1)

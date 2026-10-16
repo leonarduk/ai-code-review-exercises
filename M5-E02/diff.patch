@@ -1,0 +1,99 @@
+diff --git a/limits.py b/limits.py
+--- a/limits.py
++++ b/limits.py
+@@ -1,16 +1,45 @@
+-"""Credit limits for corporate payment accounts."""
++"""Credit limits for corporate payment accounts, with an audit trail of every change (RISK-881)."""
+ 
++from collections.abc import Callable
++from dataclasses import dataclass
++from datetime import datetime, timezone
+ from decimal import Decimal
+ 
+ 
++@dataclass(frozen=True)
++class AuditEntry:
++    at: datetime
++    actor: str
++    account: str
++    old_limit: Decimal
++    new_limit: Decimal
++    reason: str
++
++
++def _utc_now() -> datetime:
++    return datetime.now(timezone.utc)
++
++
+ class CreditLimits:
+-    def __init__(self):
++    def __init__(self, clock: Callable[[], datetime] = _utc_now):
+         self._limits: dict[str, Decimal] = {}
++        self._audit: list[AuditEntry] = []
++        self._clock = clock
+ 
+     def limit(self, account: str) -> Decimal:
+         return self._limits.get(account, Decimal("0"))
+ 
+-    def set_limit(self, account: str, new_limit: Decimal) -> None:
++    def set_limit(self, account: str, new_limit: Decimal, actor: str, reason: str) -> None:
+         if new_limit < 0:
+             raise ValueError("a credit limit cannot be negative")
++        if not actor.strip() or not reason.strip():
++            raise ValueError("every limit change needs an actor and a reason")
++        at = self._clock()
++        if at.tzinfo is None:
++            raise ValueError("audit timestamps must be timezone-aware")
++        self._audit.append(AuditEntry(at.astimezone(timezone.utc), actor, account, self.limit(account), new_limit, reason))
+         self._limits[account] = new_limit
++
++    def audit_trail(self, account: str | None = None) -> tuple[AuditEntry, ...]:
++        """Every change, oldest first; only one account's if given."""
++        return tuple(e for e in self._audit if account is None or e.account == account)
+diff --git a/tests/test_limits.py b/tests/test_limits.py
+--- a/tests/test_limits.py
++++ b/tests/test_limits.py
+@@ -1,20 +1,39 @@
++from datetime import datetime, timezone
+ from decimal import Decimal
+ 
+ import pytest
+ 
+ from limits import CreditLimits
+ 
++T0 = datetime(2026, 5, 11, 9, 30, tzinfo=timezone.utc)
++
+ 
+ def test_new_accounts_have_no_credit():
+     assert CreditLimits().limit("ACC-1") == Decimal("0")
+ 
+ 
+-def test_set_limit():
+-    limits = CreditLimits()
+-    limits.set_limit("ACC-1", Decimal("5000.00"))
++def test_set_limit_is_audited():
++    limits = CreditLimits(clock=lambda: T0)
++    limits.set_limit("ACC-1", Decimal("5000.00"), "j.smith", "annual review")
+     assert limits.limit("ACC-1") == Decimal("5000.00")
++    [entry] = limits.audit_trail("ACC-1")
++    assert (entry.at, entry.actor, entry.old_limit, entry.new_limit, entry.reason) == (
++        T0, "j.smith", Decimal("0"), Decimal("5000.00"), "annual review")
++
++
++def test_audit_trail_filters_by_account():
++    limits = CreditLimits(clock=lambda: T0)
++    limits.set_limit("ACC-1", Decimal("5000.00"), "j.smith", "annual review")
++    limits.set_limit("ACC-2", Decimal("100.00"), "j.smith", "new client")
++    assert [e.account for e in limits.audit_trail()] == ["ACC-1", "ACC-2"]
++    assert [e.account for e in limits.audit_trail("ACC-2")] == ["ACC-2"]
+ 
+ 
+ def test_negative_limits_are_rejected():
+     with pytest.raises(ValueError):
+-        CreditLimits().set_limit("ACC-1", Decimal("-1"))
++        CreditLimits().set_limit("ACC-1", Decimal("-1"), "j.smith", "typo")
++
++
++def test_a_reason_is_required():
++    with pytest.raises(ValueError):
++        CreditLimits().set_limit("ACC-1", Decimal("10"), "j.smith", "  ")

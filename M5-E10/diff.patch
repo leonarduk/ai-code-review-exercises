@@ -1,0 +1,98 @@
+diff --git a/projection.py b/projection.py
+--- a/projection.py
++++ b/projection.py
+@@ -1,12 +1,47 @@
+-"""The payments view: each card payment's status and net captured amount."""
++"""The payments view: each card payment's status and net captured amount.
+ 
++Fed from the provider's event stream, which can deliver a payment's events
++out of order and more than once (PAY-2417).
++"""
++
++import json
++from dataclasses import dataclass
+ from decimal import Decimal
++
++
++@dataclass(frozen=True)
++class PaymentEvent:
++    payment_id: str
++    sequence: int
++    kind: str
++    amount: Decimal
++
++    @classmethod
++    def from_json(cls, body: bytes) -> "PaymentEvent":
++        data = json.loads(body)
++        return cls(data["payment_id"], int(data["sequence"]), data["type"], Decimal(data["amount"]))
+ 
+ 
+ class PaymentProjection:
+     def __init__(self):
+         self._status: dict[str, str] = {}
+         self._net: dict[str, Decimal] = {}
++        self._next: dict[str, int] = {}
++        self._held: dict[str, dict[int, PaymentEvent]] = {}
++
++    def receive(self, body: bytes) -> None:
++        """Apply one event from the stream, in sequence order per payment."""
++        event = PaymentEvent.from_json(body)
++        expected = self._next.get(event.payment_id, 1)
++        if event.sequence < expected:
++            return
++        held = self._held.setdefault(event.payment_id, {})
++        held[event.sequence] = event
++        if event.sequence == expected:
++            for ready in held.values():
++                self.apply(ready.payment_id, ready.kind, ready.amount)
++            self._next[event.payment_id] = max(held) + 1
++            held.clear()
+ 
+     def apply(self, payment_id: str, kind: str, amount: Decimal) -> None:
+         """Apply one lifecycle event: authorised, captured or refunded."""
+diff --git a/tests/test_projection.py b/tests/test_projection.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_projection.py
+@@ -0,0 +1,41 @@
++import json
++from decimal import Decimal
++
++from projection import PaymentProjection
++
++
++def event(sequence, kind, amount, payment_id="pay_1"):
++    return json.dumps({"payment_id": payment_id, "sequence": sequence, "type": kind,
++                       "amount": amount}).encode()
++
++
++def test_events_in_order():
++    view = PaymentProjection()
++    view.receive(event(1, "authorised", 100.0))
++    view.receive(event(2, "captured", 100.0))
++    assert view.status("pay_1") == "captured"
++    assert view.net_captured("pay_1") == Decimal("100.00")
++
++
++def test_a_redelivered_event_is_ignored():
++    view = PaymentProjection()
++    view.receive(event(1, "authorised", 100.0))
++    view.receive(event(2, "captured", 100.0))
++    view.receive(event(2, "captured", 100.0))
++    assert view.net_captured("pay_1") == Decimal("100.00")
++
++
++def test_an_early_event_is_held_until_the_gap_is_filled():
++    view = PaymentProjection()
++    view.receive(event(2, "captured", 60.0))
++    assert view.net_captured("pay_1") == Decimal("0")
++    view.receive(event(1, "authorised", 60.0))
++    assert view.net_captured("pay_1") == Decimal("60.00")
++
++
++def test_partial_refund():
++    view = PaymentProjection()
++    for sequence, kind, amount in [(1, "authorised", 100.0), (2, "captured", 100.0), (3, "refunded", 25.5)]:
++        view.receive(event(sequence, kind, amount))
++    assert view.status("pay_1") == "refunded"
++    assert view.net_captured("pay_1") == Decimal("74.50")

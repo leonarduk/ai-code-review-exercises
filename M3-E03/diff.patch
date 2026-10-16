@@ -1,0 +1,90 @@
+diff --git a/cutoff.py b/cutoff.py
+--- a/cutoff.py
++++ b/cutoff.py
+@@ -1,13 +1,38 @@
+-"""Booking date for client orders received around the daily cut-off."""
++"""Booking date for client orders received around the New York cut-off."""
+ 
+-from datetime import date, datetime, time, timedelta
++from __future__ import annotations
+ 
+-CUT_OFF_UTC = time(22, 0)
++from datetime import date, datetime, time, timedelta, timezone
++from typing import AbstractSet
++
++NEW_YORK = timezone(timedelta(hours=-5), "America/New_York")
++CUT_OFF = time(17, 0)
++FEED_FORMAT = "%Y-%m-%d %H:%M:%S"
+ 
+ 
+-def booking_date(received_at_utc: datetime) -> date:
+-    """Orders received at or after 22:00 UTC are booked the next day."""
+-    day = received_at_utc.date()
+-    if received_at_utc.time() >= CUT_OFF_UTC:
++def parse_feed_timestamp(text: str) -> datetime:
++    """Parse an order-feed timestamp; the feed writes UTC without an offset."""
++    return datetime.strptime(text.strip(), FEED_FORMAT).astimezone(timezone.utc)
++
++
++def booking_date(received_at: datetime, holidays: AbstractSet[date] = frozenset()) -> date:
++    """Book on the New York business day of receipt, or the next business
++    day if the order arrives at or after 17:00 New York time."""
++    if received_at.tzinfo is None:
++        raise ValueError("received_at must be timezone-aware")
++    local = received_at.astimezone(NEW_YORK)
++    day = local.date()
++    if local.time() >= CUT_OFF or not _is_business_day(day, holidays):
++        day = _next_business_day(day, holidays)
++    return day
++
++
++def _is_business_day(day: date, holidays: AbstractSet[date]) -> bool:
++    return day.weekday() < 5 and day not in holidays
++
++
++def _next_business_day(day: date, holidays: AbstractSet[date]) -> date:
++    day += timedelta(days=1)
++    while not _is_business_day(day, holidays):
+         day += timedelta(days=1)
+     return day
+diff --git a/tests/test_cutoff.py b/tests/test_cutoff.py
+--- a/tests/test_cutoff.py
++++ b/tests/test_cutoff.py
+@@ -1,7 +1,33 @@
+-from datetime import date, datetime
++from datetime import date, datetime, timezone
+ 
+-from cutoff import booking_date
++import pytest
++
++from cutoff import booking_date, parse_feed_timestamp
++
++UTC = timezone.utc
+ 
+ 
+-def test_after_cut_off_books_next_day():
+-    assert booking_date(datetime(2026, 1, 15, 22, 30)) == date(2026, 1, 16)
++@pytest.mark.parametrize(
++    ("received_at", "expected"),
++    [
++        (datetime(2026, 1, 15, 21, 30, tzinfo=UTC), date(2026, 1, 15)),  # 16:30 New York
++        (datetime(2026, 1, 15, 22, 30, tzinfo=UTC), date(2026, 1, 16)),  # 17:30 New York
++        (datetime(2026, 1, 16, 23, 0, tzinfo=UTC), date(2026, 1, 19)),   # Friday evening
++    ],
++)
++def test_booking_date(received_at, expected):
++    assert booking_date(received_at) == expected
++
++
++def test_holidays_are_skipped():
++    received = datetime(2026, 1, 16, 23, 0, tzinfo=UTC)
++    assert booking_date(received, {date(2026, 1, 19)}) == date(2026, 1, 20)
++
++
++def test_naive_datetimes_are_rejected():
++    with pytest.raises(ValueError):
++        booking_date(datetime(2026, 1, 15, 12, 0))
++
++
++def test_parse_feed_timestamp_is_utc():
++    assert parse_feed_timestamp("2026-01-15 22:30:00").tzinfo is UTC

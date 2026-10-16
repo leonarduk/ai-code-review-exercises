@@ -1,0 +1,104 @@
+diff --git a/tests/test_webhooks.py b/tests/test_webhooks.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_webhooks.py
+@@ -0,0 +1,44 @@
++import hashlib
++import hmac
++import json
++from datetime import datetime, timedelta, timezone
++
++from webhooks import Delivery, WebhookReceiver
++
++SECRET = b"whsec_test"
++T0 = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
++
++
++def delivery(key, at, event=None, secret=SECRET):
++    body = json.dumps(event or {"type": "payment.settled", "id": key}).encode()
++    return Delivery(key, at, body, hmac.new(secret, body, hashlib.sha256).hexdigest())
++
++
++def receiver():
++    handled = []
++    return WebhookReceiver(SECRET, handled.append), handled
++
++
++def test_first_delivery_is_handled():
++    r, handled = receiver()
++    assert r.receive(delivery("evt_1", T0)) == "accepted"
++    assert handled == [{"type": "payment.settled", "id": "evt_1"}]
++
++
++def test_retry_within_the_window_is_a_duplicate():
++    r, handled = receiver()
++    r.receive(delivery("evt_1", T0))
++    assert r.receive(delivery("evt_1", T0 + timedelta(hours=5))) == "duplicate"
++    assert len(handled) == 1
++
++
++def test_keys_are_forgotten_after_the_window():
++    r, handled = receiver()
++    r.receive(delivery("evt_1", T0))
++    assert r.receive(delivery("evt_1", T0 + timedelta(days=4))) == "accepted"
++
++
++def test_bad_signature_is_rejected():
++    r, handled = receiver()
++    assert r.receive(delivery("evt_1", T0, secret=b"not-our-secret")) == "rejected"
++    assert handled == []
+diff --git a/webhooks.py b/webhooks.py
+--- a/webhooks.py
++++ b/webhooks.py
+@@ -1,22 +1,47 @@
+-"""Receives payment-provider webhooks."""
++"""Receives payment-provider webhooks, once per idempotency key (PAY-2340)."""
+ 
+ import hashlib
+ import hmac
+ import json
+ from collections.abc import Callable
++from dataclasses import dataclass
++from datetime import datetime, timedelta
++
++RETENTION = timedelta(hours=72)
++
++
++@dataclass(frozen=True)
++class Delivery:
++    key: str
++    received_at: datetime
++    body: bytes
++    signature: str
+ 
+ 
+ class WebhookReceiver:
+     def __init__(self, secret: bytes, handler: Callable[[dict], None]):
+         self._secret = secret
+         self._handler = handler
++        self._seen: dict[str, datetime] = {}
+ 
+     def _verify(self, body: bytes, signature: str) -> bool:
+         expected = hmac.new(self._secret, body, hashlib.sha256).hexdigest()
+         return hmac.compare_digest(expected, signature)
+ 
+-    def receive(self, body: bytes, signature: str) -> str:
+-        if not self._verify(body, signature):
++    def receive(self, delivery: Delivery) -> str:
++        """'accepted', 'duplicate' or 'rejected'."""
++        if delivery.received_at.tzinfo is None:
++            raise ValueError("received_at must be timezone-aware")
++        if not self._verify(delivery.body, delivery.signature):
+             return "rejected"
+-        self._handler(json.loads(body))
++        self._forget_before(delivery.received_at - RETENTION)
++        if delivery.key in self._seen:
++            return "duplicate"
++        self._handler(json.loads(delivery.body))
++        self._seen[delivery.key] = delivery.received_at
+         return "accepted"
++
++    def _forget_before(self, cutoff: datetime) -> None:
++        for key, seen_at in list(self._seen.items()):
++            if seen_at < cutoff:
++                del self._seen[key]

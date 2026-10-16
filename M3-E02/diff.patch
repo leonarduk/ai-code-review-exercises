@@ -1,0 +1,87 @@
+diff --git a/business_days.py b/business_days.py
+--- a/business_days.py
++++ b/business_days.py
+@@ -15,3 +15,37 @@
+     while not is_business_day(day, holidays):
+         day += ONE_DAY
+     return day
++
++
++def preceding(day: date, holidays: AbstractSet[date]) -> date:
++    """Roll back to the last business day on or before day."""
++    while not is_business_day(day, holidays):
++        day -= ONE_DAY
++    return day
++
++
++def modified_following(day: date, holidays: AbstractSet[date]) -> date:
++    """Roll forward to a business day, unless that crosses into the next
++    month, in which case roll back instead (ISDA Modified Following)."""
++    adjusted = following(day, holidays)
++    if adjusted.month > day.month:
++        return preceding(day, holidays)
++    return adjusted
++
++
++CONVENTIONS = {
++    "following": following,
++    "preceding": preceding,
++    "modified_following": modified_following,
++}
++
++
++def adjust_schedule(
++    dates: list[date], holidays: AbstractSet[date], convention: str = "modified_following"
++) -> list[date]:
++    """Adjust every unadjusted payment date in a schedule."""
++    try:
++        roll = CONVENTIONS[convention]
++    except KeyError:
++        raise ValueError(f"unknown business-day convention: {convention!r}") from None
++    return [roll(day, holidays) for day in dates]
+diff --git a/tests/test_business_days.py b/tests/test_business_days.py
+--- a/tests/test_business_days.py
++++ b/tests/test_business_days.py
+@@ -1,7 +1,40 @@
+ from datetime import date
+ 
+-from business_days import following
++import pytest
++
++from business_days import adjust_schedule, following, modified_following, preceding
++
++NO_HOLIDAYS: set[date] = set()
+ 
+ 
+ def test_following_rolls_a_saturday_to_monday():
+-    assert following(date(2026, 10, 17), set()) == date(2026, 10, 19)
++    assert following(date(2026, 10, 17), NO_HOLIDAYS) == date(2026, 10, 19)
++
++
++def test_preceding_rolls_a_saturday_to_friday():
++    assert preceding(date(2026, 10, 17), NO_HOLIDAYS) == date(2026, 10, 16)
++
++
++@pytest.mark.parametrize(
++    ("unadjusted", "expected"),
++    [
++        (date(2026, 10, 17), date(2026, 10, 19)),  # stays in October: roll forward
++        (date(2026, 10, 31), date(2026, 10, 30)),  # would cross into November: roll back
++        (date(2026, 5, 31), date(2026, 5, 29)),    # would cross into June: roll back
++        (date(2026, 10, 20), date(2026, 10, 20)),  # already a business day
++    ],
++)
++def test_modified_following(unadjusted, expected):
++    assert modified_following(unadjusted, NO_HOLIDAYS) == expected
++
++
++def test_adjust_schedule_uses_the_named_convention():
++    schedule = [date(2026, 10, 31), date(2026, 11, 30)]
++    assert adjust_schedule(schedule, NO_HOLIDAYS, "following") == [
++        date(2026, 11, 2), date(2026, 11, 30),
++    ]
++
++
++def test_unknown_convention_is_rejected():
++    with pytest.raises(ValueError):
++        adjust_schedule([date(2026, 10, 31)], NO_HOLIDAYS, "nearest")

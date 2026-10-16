@@ -1,0 +1,112 @@
+diff --git a/merchant_fees.py b/merchant_fees.py
+--- a/merchant_fees.py
++++ b/merchant_fees.py
+@@ -1,9 +1,20 @@
+-"""Merchant service charges on card sales."""
++"""Merchant service charges on card sales and refunds."""
+ 
+-from decimal import Decimal, ROUND_DOWN
++from __future__ import annotations
++
++from dataclasses import dataclass
++from decimal import Decimal, ROUND_DOWN, ROUND_FLOOR
+ 
+ CENT = Decimal("0.01")
+ RATE = Decimal("0.0195")
++
++SCHEME_RATES = {
++    "VISA": Decimal("0.0195"),
++    "MASTERCARD": Decimal("0.0195"),
++    "AMEX": Decimal("0.0290"),
++}
++MINIMUM_FEE = Decimal("0.20")
++MAXIMUM_FEE = Decimal("15.00")
+ 
+ 
+ def sale_fee(amount: Decimal) -> Decimal:
+@@ -11,3 +22,35 @@
+     if amount <= 0:
+         raise ValueError("sale amount must be positive")
+     return (amount * RATE).quantize(CENT, rounding=ROUND_DOWN)
++
++
++def scheme_rate(scheme: str) -> Decimal:
++    try:
++        return SCHEME_RATES[scheme.upper()]
++    except KeyError:
++        raise ValueError(f"unsupported card scheme {scheme!r}") from None
++
++
++def _clamp(fee: Decimal) -> Decimal:
++    """Bound the size of a signed fee by the minimum and maximum fee."""
++    size = min(max(abs(fee), MINIMUM_FEE), MAXIMUM_FEE)
++    return size.copy_sign(fee)
++
++
++def transaction_fee(amount: Decimal, scheme: str) -> Decimal:
++    """Fee on a card transaction: positive for a sale, negative for a refund."""
++    if amount == 0:
++        raise ValueError("transaction amount cannot be zero")
++    fee = _clamp(amount * scheme_rate(scheme))
++    return fee.quantize(CENT, rounding=ROUND_FLOOR)
++
++
++@dataclass(frozen=True)
++class Transaction:
++    scheme: str
++    amount: Decimal  # negative for a refund
++
++
++def fees_due(transactions: list[Transaction]) -> Decimal:
++    """Net fees for a settlement batch: fees on sales less fees refunded."""
++    return sum((transaction_fee(t.amount, t.scheme) for t in transactions), Decimal("0.00"))
+diff --git a/tests/test_merchant_fees.py b/tests/test_merchant_fees.py
+--- a/tests/test_merchant_fees.py
++++ b/tests/test_merchant_fees.py
+@@ -2,7 +2,7 @@
+ 
+ import pytest
+ 
+-from merchant_fees import sale_fee
++from merchant_fees import Transaction, fees_due, sale_fee, transaction_fee
+ 
+ 
+ def test_fee_is_truncated_to_the_cent():
+@@ -13,3 +13,37 @@
+ def test_non_positive_sale_is_rejected():
+     with pytest.raises(ValueError):
+         sale_fee(Decimal("0.00"))
++
++
++@pytest.mark.parametrize(
++    ("amount", "scheme", "expected"),
++    [
++        ("100.00", "VISA", "1.95"),
++        ("57.89", "mastercard", "1.12"),
++        ("250.00", "AMEX", "7.25"),
++        ("5.00", "VISA", "0.20"),
++        ("2000.00", "AMEX", "15.00"),
++    ],
++)
++def test_sale_fees(amount, scheme, expected):
++    assert transaction_fee(Decimal(amount), scheme) == Decimal(expected)
++
++
++def test_refund_reverses_the_fee():
++    assert transaction_fee(Decimal("-100.00"), "VISA") == Decimal("-1.95")
++    assert transaction_fee(Decimal("-2000.00"), "AMEX") == Decimal("-15.00")
++
++
++def test_batch_nets_refunds_against_sales():
++    batch = [
++        Transaction("VISA", Decimal("100.00")),
++        Transaction("AMEX", Decimal("250.00")),
++        Transaction("VISA", Decimal("-100.00")),
++    ]
++    assert fees_due(batch) == Decimal("7.25")
++
++
++@pytest.mark.parametrize(("amount", "scheme"), [("0.00", "VISA"), ("10.00", "DINERS")])
++def test_invalid_transactions_are_rejected(amount, scheme):
++    with pytest.raises(ValueError):
++        transaction_fee(Decimal(amount), scheme)

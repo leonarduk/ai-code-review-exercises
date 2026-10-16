@@ -1,0 +1,80 @@
+diff --git a/journal.py b/journal.py
+--- a/journal.py
++++ b/journal.py
+@@ -1,4 +1,4 @@
+-"""General-ledger journal entries."""
++"""General-ledger journal entries, validated before posting (GL-718)."""
+ 
+ from dataclasses import dataclass
+ from decimal import Decimal
+@@ -24,9 +24,26 @@
+     lines: tuple[Line, ...]
+ 
+ 
++class UnbalancedEntry(Exception):
++    """Debits and credits of a journal entry do not agree."""
++
++
++def validate(entry: JournalEntry) -> None:
++    if len(entry.lines) < 2:
++        raise ValueError(f"{entry.entry_id}: an entry needs at least two lines")
++    for line in entry.lines:
++        if line.amount <= 0:
++            raise ValueError(f"{entry.entry_id}: amounts are positive; the side gives the sign")
++    debits = sum(line.amount for line in entry.lines if line.side is Side.DEBIT)
++    credits = sum(line.amount for line in entry.lines if line.side is Side.CREDIT)
++    if debits != credits:
++        raise UnbalancedEntry(f"{entry.entry_id}: debits {debits} != credits {credits}")
++
++
+ class GeneralLedger:
+     def __init__(self):
+         self.entries: list[JournalEntry] = []
+ 
+     def post(self, entry: JournalEntry) -> None:
++        validate(entry)
+         self.entries.append(entry)
+diff --git a/tests/test_journal.py b/tests/test_journal.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_journal.py
+@@ -0,0 +1,39 @@
++from decimal import Decimal
++
++import pytest
++
++from journal import GeneralLedger, JournalEntry, Line, Side, UnbalancedEntry
++
++
++def line(account, side, amount, currency="GBP"):
++    return Line(account, side, Decimal(amount), currency)
++
++
++def test_balanced_entry_is_posted():
++    gl = GeneralLedger()
++    entry = JournalEntry("JE-1", (line("cash", Side.DEBIT, "120.00"), line("fees", Side.CREDIT, "100.00"),
++                                  line("vat", Side.CREDIT, "20.00")))
++    gl.post(entry)
++    assert gl.entries == [entry]
++
++
++def test_unbalanced_entry_is_rejected():
++    gl = GeneralLedger()
++    with pytest.raises(UnbalancedEntry):
++        gl.post(JournalEntry("JE-2", (line("cash", Side.DEBIT, "120.00"), line("fees", Side.CREDIT, "100.00"))))
++    assert gl.entries == []
++
++
++def test_fx_trade_balances_in_each_currency():
++    entry = JournalEntry("JE-3", (
++        line("cash-usd", Side.DEBIT, "100.00", "USD"), line("fx-position-usd", Side.CREDIT, "100.00", "USD"),
++        line("fx-position-eur", Side.DEBIT, "92.00", "EUR"), line("cash-eur", Side.CREDIT, "92.00", "EUR"),
++    ))
++    GeneralLedger().post(entry)
++
++
++def test_single_line_and_negative_amounts_are_rejected():
++    with pytest.raises(ValueError):
++        GeneralLedger().post(JournalEntry("JE-4", (line("cash", Side.DEBIT, "1.00"),)))
++    with pytest.raises(ValueError):
++        GeneralLedger().post(JournalEntry("JE-5", (line("cash", Side.DEBIT, "-1.00"), line("fees", Side.CREDIT, "-1.00"))))

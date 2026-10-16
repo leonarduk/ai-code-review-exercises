@@ -1,0 +1,106 @@
+diff --git a/src/com/example/acquiring/SettlementBatch.java b/src/com/example/acquiring/SettlementBatch.java
+--- a/src/com/example/acquiring/SettlementBatch.java
++++ b/src/com/example/acquiring/SettlementBatch.java
+@@ -10,10 +10,19 @@
+  */
+ public final class SettlementBatch {
+ 
++    /** The highest merchant discount rate the acquirer agrees: 10%. */
++    public static final int MAX_MDR_BASIS_POINTS = 1_000;
++    private static final double BASIS_POINTS_PER_UNIT = 10_000.0;
++
+     private final List<Transaction> transactions;
++    private final int mdrBasisPoints;
+ 
+-    public SettlementBatch(List<Transaction> transactions) {
++    public SettlementBatch(List<Transaction> transactions, int mdrBasisPoints) {
+         this.transactions = List.copyOf(Objects.requireNonNull(transactions, "transactions"));
++        if (mdrBasisPoints < 0 || mdrBasisPoints > MAX_MDR_BASIS_POINTS) {
++            throw new IllegalArgumentException("MDR out of range: " + mdrBasisPoints + " bp");
++        }
++        this.mdrBasisPoints = mdrBasisPoints;
+     }
+ 
+     /** Sales minus refunds. */
+@@ -24,4 +33,27 @@
+         }
+         return gross;
+     }
++
++    /**
++     * The merchant discount on one transaction, rounded half away from zero
++     * to the minor unit. A refund returns the fee charged on the sale.
++     */
++    public long feeMinor(Transaction t) {
++        long scaled = t.amountMinor() * mdrBasisPoints;
++        return Math.round(scaled / BASIS_POINTS_PER_UNIT);
++    }
++
++    /** The batch's merchant discount: the sum of the transaction fees. */
++    public long feesMinor() {
++        var fees = 0;
++        for (Transaction t : transactions) {
++            fees += feeMinor(t);
++        }
++        return fees;
++    }
++
++    /** What the merchant is paid: gross minus fees. */
++    public long netMinor() {
++        return Math.subtractExact(grossMinor(), feesMinor());
++    }
+ }
+diff --git a/tests/com/example/acquiring/SettlementBatchTest.java b/tests/com/example/acquiring/SettlementBatchTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/acquiring/SettlementBatchTest.java
+@@ -0,0 +1,49 @@
++package com.example.acquiring;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class SettlementBatchTest {
++
++    @Test
++    void feeOnASale() {
++        SettlementBatch batch = new SettlementBatch(List.of(), 150);
++        // 100.00 EUR at 1.50%
++        assertEquals(150, batch.feeMinor(new Transaction("S-1", 10_000)));
++        // 25.50 EUR at 1.50% = 38.25 cents
++        assertEquals(38, batch.feeMinor(new Transaction("S-2", 2_550)));
++    }
++
++    @Test
++    void aRefundReturnsTheFee() {
++        SettlementBatch batch = new SettlementBatch(List.of(), 150);
++        assertEquals(-150, batch.feeMinor(new Transaction("R-1", -10_000)));
++    }
++
++    @Test
++    void netIsGrossMinusFees() {
++        SettlementBatch batch = new SettlementBatch(List.of(
++                new Transaction("S-1", 10_000),
++                new Transaction("S-2", 2_550),
++                new Transaction("R-1", -10_000)), 150);
++        assertEquals(2_550, batch.grossMinor());
++        assertEquals(38, batch.feesMinor());
++        assertEquals(2_512, batch.netMinor());
++    }
++
++    @Test
++    void anEmptyBatchSettlesNothing() {
++        SettlementBatch batch = new SettlementBatch(List.of(), 150);
++        assertEquals(0, batch.feesMinor());
++        assertEquals(0, batch.netMinor());
++    }
++
++    @Test
++    void mdrOutOfRangeIsRejected() {
++        assertThrows(IllegalArgumentException.class, () -> new SettlementBatch(List.of(), -1));
++        assertThrows(IllegalArgumentException.class, () -> new SettlementBatch(List.of(), 1_001));
++    }
++}

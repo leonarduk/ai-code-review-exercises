@@ -1,0 +1,87 @@
+diff --git a/accrual.py b/accrual.py
+--- a/accrual.py
++++ b/accrual.py
+@@ -1,11 +1,47 @@
+ """Interest accrual for term deposits."""
+ 
++from __future__ import annotations
++
++from dataclasses import dataclass
++from datetime import date, timedelta
+ from decimal import Decimal, ROUND_HALF_EVEN
++from typing import Iterator
+ 
+ CENT = Decimal("0.01")
++DAYS_IN_YEAR = Decimal(365)  # ACT/365 Fixed
++
++
++@dataclass(frozen=True)
++class DailyAccrual:
++    """Interest accrued for a single calendar day, before any rounding."""
++
++    accrual_date: date
++    amount: Decimal
+ 
+ 
+ def simple_interest(principal: Decimal, annual_rate: Decimal, days: int) -> Decimal:
+     """Simple interest for a number of days, ACT/365 Fixed, rounded to the cent."""
+-    interest = principal * annual_rate * days / Decimal(365)
++    interest = principal * annual_rate * days / DAYS_IN_YEAR
+     return interest.quantize(CENT, rounding=ROUND_HALF_EVEN)
++
++
++def daily_accruals(
++    principal: Decimal, annual_rate: Decimal, start: date, end: date
++) -> Iterator[DailyAccrual]:
++    """Yield one unrounded accrual per day of the accrual period."""
++    if end < start:
++        raise ValueError(f"accrual end {end} is before start {start}")
++    daily_amount = principal * annual_rate / DAYS_IN_YEAR
++    for offset in range((end - start).days + 1):
++        yield DailyAccrual(start + timedelta(days=offset), daily_amount)
++
++
++def accrued_interest(
++    principal: Decimal, annual_rate: Decimal, start: date, end: date
++) -> Decimal:
++    """Interest accrued over the period, rounded once to the cent."""
++    total = sum(
++        (accrual.amount for accrual in daily_accruals(principal, annual_rate, start, end)),
++        Decimal(0),
++    )
++    return total.quantize(CENT, rounding=ROUND_HALF_EVEN)
+diff --git a/tests/test_accrual.py b/tests/test_accrual.py
+--- a/tests/test_accrual.py
++++ b/tests/test_accrual.py
+@@ -1,7 +1,29 @@
++from datetime import date
+ from decimal import Decimal
+ 
+-from accrual import simple_interest
++import pytest
++
++from accrual import accrued_interest, daily_accruals, simple_interest
++
++PRINCIPAL = Decimal("1000000.00")
++RATE = Decimal("0.0365")  # 100.00 per day on ACT/365
+ 
+ 
+ def test_simple_interest():
+-    assert simple_interest(Decimal("1000000.00"), Decimal("0.0365"), 10) == Decimal("1000.00")
++    assert simple_interest(PRINCIPAL, RATE, 10) == Decimal("1000.00")
++
++
++def test_one_accrual_per_day_of_january():
++    accruals = list(daily_accruals(PRINCIPAL, RATE, date(2024, 1, 1), date(2024, 1, 31)))
++    assert len(accruals) == 31
++    assert accruals[0].accrual_date == date(2024, 1, 1)
++    assert all(a.amount == Decimal("100") for a in accruals)
++
++
++def test_accrued_interest_for_first_ten_days_of_march():
++    assert accrued_interest(PRINCIPAL, RATE, date(2024, 3, 1), date(2024, 3, 10)) == Decimal("1000.00")
++
++
++def test_end_before_start_is_rejected():
++    with pytest.raises(ValueError):
++        list(daily_accruals(PRINCIPAL, RATE, date(2024, 3, 10), date(2024, 3, 1)))

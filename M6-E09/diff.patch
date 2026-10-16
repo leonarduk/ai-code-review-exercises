@@ -1,0 +1,126 @@
+diff --git a/src/com/example/status/SchemeStatus.java b/src/com/example/status/SchemeStatus.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/status/SchemeStatus.java
+@@ -0,0 +1,15 @@
++package com.example.status;
++
++/** Transaction status codes in the scheme's pain.002 status reports. */
++public enum SchemeStatus {
++    /** Accepted for processing. */
++    ACCP,
++    /** Pending at the scheme. */
++    PDNG,
++    /** Accepted, settlement in process. */
++    ACSP,
++    /** Settlement completed. */
++    ACSC,
++    /** Rejected. */
++    RJCT
++}
+diff --git a/src/com/example/status/StatusReportHandler.java b/src/com/example/status/StatusReportHandler.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/status/StatusReportHandler.java
+@@ -0,0 +1,33 @@
++package com.example.status;
++
++/** Applies the scheme's status reports to outgoing payments (PAY-1419). */
++public final class StatusReportHandler {
++
++    private final Funds funds;
++
++    public StatusReportHandler(Funds funds) {
++        this.funds = funds;
++    }
++
++    public void apply(Payment payment, String statusCode) {
++        SchemeStatus status = SchemeStatus.valueOf(statusCode.trim());
++        if (payment.isFinal()) {
++            return;
++        }
++        switch (status) {
++            case ACCP:
++            case PDNG:
++                break;
++            case ACSP:
++                payment.moveTo(Payment.State.IN_PROCESS);
++            case ACSC:
++                payment.moveTo(Payment.State.SETTLED);
++                funds.debit(payment.debtorAccount(), payment.amount());
++                break;
++            case RJCT:
++                payment.moveTo(Payment.State.REJECTED);
++                funds.release(payment.debtorAccount(), payment.amount());
++                break;
++        }
++    }
++}
+diff --git a/tests/com/example/status/StatusReportHandlerTest.java b/tests/com/example/status/StatusReportHandlerTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/status/StatusReportHandlerTest.java
+@@ -0,0 +1,63 @@
++package com.example.status;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++
++import java.math.BigDecimal;
++import java.util.ArrayList;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class StatusReportHandlerTest {
++
++    private final List<String> movements = new ArrayList<>();
++    private final StatusReportHandler handler = new StatusReportHandler(new Funds() {
++        @Override
++        public void debit(String account, BigDecimal amount) {
++            movements.add("debit " + account + " " + amount);
++        }
++
++        @Override
++        public void release(String account, BigDecimal amount) {
++            movements.add("release " + account + " " + amount);
++        }
++    });
++
++    private final Payment payment = new Payment("PAY-1", "ACC-7", new BigDecimal("250.00"));
++
++    @Test
++    void aSettledPaymentIsDebited() {
++        handler.apply(payment, "ACSC");
++        assertEquals(Payment.State.SETTLED, payment.state());
++        assertEquals(List.of("debit ACC-7 250.00"), movements);
++    }
++
++    @Test
++    void aRejectedPaymentReleasesTheFunds() {
++        handler.apply(payment, "RJCT");
++        assertEquals(Payment.State.REJECTED, payment.state());
++        assertEquals(List.of("release ACC-7 250.00"), movements);
++    }
++
++    @Test
++    void anAcceptedPaymentIsUnchanged() {
++        handler.apply(payment, "ACCP");
++        assertEquals(Payment.State.SUBMITTED, payment.state());
++        assertEquals(List.of(), movements);
++    }
++
++    @Test
++    void aRepeatedFinalReportChangesNothing() {
++        handler.apply(payment, "ACSC");
++        handler.apply(payment, "ACSC");
++        handler.apply(payment, "RJCT");
++        assertEquals(Payment.State.SETTLED, payment.state());
++        assertEquals(List.of("debit ACC-7 250.00"), movements);
++    }
++
++    @Test
++    void anUnknownCodeIsRejected() {
++        assertThrows(IllegalArgumentException.class, () -> handler.apply(payment, "ABCD"));
++        assertEquals(Payment.State.SUBMITTED, payment.state());
++    }
++}

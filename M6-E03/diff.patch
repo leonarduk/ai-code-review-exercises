@@ -1,0 +1,154 @@
+diff --git a/src/com/example/approvals/Action.java b/src/com/example/approvals/Action.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/approvals/Action.java
+@@ -0,0 +1,7 @@
++package com.example.approvals;
++
++/** What an audit entry records. */
++public enum Action {
++    APPROVED,
++    RELEASED
++}
+diff --git a/src/com/example/approvals/AuditEntry.java b/src/com/example/approvals/AuditEntry.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/approvals/AuditEntry.java
+@@ -0,0 +1,8 @@
++package com.example.approvals;
++
++import java.time.Instant;
++import java.util.List;
++
++/** One immutable line of the approval audit trail: the approvers are those the payment had at that moment. */
++public record AuditEntry(long sequence, String paymentId, Action action, Instant at, List<String> approvers) {
++}
+diff --git a/src/com/example/approvals/AuditTrail.java b/src/com/example/approvals/AuditTrail.java
+new file mode 100644
+--- /dev/null
++++ b/src/com/example/approvals/AuditTrail.java
+@@ -0,0 +1,35 @@
++package com.example.approvals;
++
++import java.time.Clock;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++/** The approval audit trail (CMP-512): append-only, numbered from 1, timed by the injected clock. */
++public final class AuditTrail {
++
++    private final Clock clock;
++    private final Map<String, List<AuditEntry>> byPayment = new HashMap<>();
++    private long nextSequence = 1;
++
++    public AuditTrail(Clock clock) {
++        this.clock = clock;
++    }
++
++    public AuditEntry record(String paymentId, Action action, List<String> approvers) {
++        AuditEntry entry = new AuditEntry(nextSequence++, paymentId, action, clock.instant(), approvers);
++        byPayment.computeIfAbsent(paymentId, id -> new ArrayList<>()).add(entry);
++        return entry;
++    }
++
++    /** The payment's trail so far, oldest first. */
++    public List<AuditEntry> entries(String paymentId) {
++        return Collections.unmodifiableList(byPayment.getOrDefault(paymentId, List.of()));
++    }
++
++    public long size() {
++        return nextSequence - 1;
++    }
++}
+diff --git a/src/com/example/approvals/PaymentApprovals.java b/src/com/example/approvals/PaymentApprovals.java
+--- a/src/com/example/approvals/PaymentApprovals.java
++++ b/src/com/example/approvals/PaymentApprovals.java
+@@ -9,6 +9,11 @@
+ public final class PaymentApprovals {
+ 
+     private final Map<String, List<String>> approvers = new HashMap<>();
++    private final AuditTrail audit;
++
++    public PaymentApprovals(AuditTrail audit) {
++        this.audit = audit;
++    }
+ 
+     /** Records an approval; returns true when the payment now has two approvers and is released. */
+     public boolean approve(String paymentId, String approver) {
+@@ -17,6 +22,11 @@
+             throw new IllegalStateException(approver + " has already approved " + paymentId);
+         }
+         sofar.add(approver);
+-        return sofar.size() == 2;
++        audit.record(paymentId, Action.APPROVED, sofar);
++        if (sofar.size() == 2) {
++            audit.record(paymentId, Action.RELEASED, sofar);
++            return true;
++        }
++        return false;
+     }
+ }
+diff --git a/tests/com/example/approvals/PaymentApprovalsTest.java b/tests/com/example/approvals/PaymentApprovalsTest.java
+new file mode 100644
+--- /dev/null
++++ b/tests/com/example/approvals/PaymentApprovalsTest.java
+@@ -0,0 +1,56 @@
++package com.example.approvals;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++import java.time.Clock;
++import java.time.Instant;
++import java.time.ZoneOffset;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++
++class PaymentApprovalsTest {
++
++    private static final Instant NOON = Instant.parse("2026-10-15T12:00:00Z");
++
++    private final AuditTrail trail = new AuditTrail(Clock.fixed(NOON, ZoneOffset.UTC));
++    private final PaymentApprovals approvals = new PaymentApprovals(trail);
++
++    @Test
++    void theFirstApprovalIsRecorded() {
++        assertFalse(approvals.approve("PAY-1", "ana"));
++        assertEquals(List.of(new AuditEntry(1, "PAY-1", Action.APPROVED, NOON, List.of("ana"))),
++                trail.entries("PAY-1"));
++    }
++
++    @Test
++    void theSecondApproverReleasesThePayment() {
++        approvals.approve("PAY-1", "ana");
++        assertTrue(approvals.approve("PAY-1", "ben"));
++        List<AuditEntry> entries = trail.entries("PAY-1");
++        assertEquals(3, entries.size());
++        assertEquals(Action.RELEASED, entries.get(2).action());
++        assertEquals(List.of("ana", "ben"), entries.get(2).approvers());
++    }
++
++    @Test
++    void theSameApproverCannotApproveTwice() {
++        approvals.approve("PAY-1", "ana");
++        assertThrows(IllegalStateException.class, () -> approvals.approve("PAY-1", "ana"));
++    }
++
++    @Test
++    void aPaymentWithNoApprovalsHasAnEmptyTrail() {
++        assertEquals(List.of(), trail.entries("PAY-9"));
++    }
++
++    @Test
++    void sequenceNumbersRunAcrossPayments() {
++        approvals.approve("PAY-1", "ana");
++        approvals.approve("PAY-2", "ana");
++        assertEquals(2, trail.entries("PAY-2").get(0).sequence());
++        assertEquals(2, trail.size());
++    }
++}

@@ -1,0 +1,78 @@
+diff --git a/liquidity.py b/liquidity.py
+--- a/liquidity.py
++++ b/liquidity.py
+@@ -1,13 +1,37 @@
+-"""Intraday liquidity charges for overdrawn settlement accounts."""
++"""Intraday liquidity charges for overdrawn settlement accounts.
+ 
+-from datetime import date
++Charged per hour of the London calendar day, so the clock-change days
++(23 and 25 hours long) are charged for the hours they actually have.
++"""
++
++from __future__ import annotations
++
++from datetime import date, datetime, time, timedelta
+ from decimal import Decimal, ROUND_HALF_EVEN
++from zoneinfo import ZoneInfo
+ 
++LONDON = ZoneInfo("Europe/London")
+ CENT = Decimal("0.01")
+-DAYS_PER_YEAR = Decimal(365)
++HOURS_PER_YEAR = Decimal(365 * 24)
++SECONDS_PER_HOUR = Decimal(3600)
++
++
++def london_day_bounds(day: date) -> tuple[datetime, datetime]:
++    """Local midnight at the start of day and at the start of the next day."""
++    start = datetime.combine(day, time.min, tzinfo=LONDON)
++    end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=LONDON)
++    return start, end
++
++
++def hours_in_day(day: date) -> Decimal:
++    """Length of the London calendar day, in hours."""
++    start, end = london_day_bounds(day)
++    return Decimal((end - start).total_seconds()) / SECONDS_PER_HOUR
+ 
+ 
+ def daily_charge(average_overdraft: Decimal, annual_rate: Decimal, day: date) -> Decimal:
+-    """One day's charge on the average overdrawn balance."""
+-    charge = average_overdraft * annual_rate / DAYS_PER_YEAR
++    """One London day's charge on the average overdrawn balance."""
++    if average_overdraft < 0:
++        raise ValueError("average overdraft must not be negative")
++    charge = average_overdraft * annual_rate * hours_in_day(day) / HOURS_PER_YEAR
+     return charge.quantize(CENT, rounding=ROUND_HALF_EVEN)
+diff --git a/tests/test_liquidity.py b/tests/test_liquidity.py
+--- a/tests/test_liquidity.py
++++ b/tests/test_liquidity.py
+@@ -1,8 +1,25 @@
+ from datetime import date
+ from decimal import Decimal
+ 
+-from liquidity import daily_charge
++import pytest
++
++from liquidity import daily_charge, hours_in_day, london_day_bounds
+ 
+ 
+-def test_daily_charge():
+-    assert daily_charge(Decimal("3650000.00"), Decimal("0.05"), date(2026, 6, 1)) == Decimal("500.00")
++def test_an_ordinary_day_has_24_hours():
++    assert hours_in_day(date(2026, 6, 1)) == Decimal(24)
++
++
++def test_day_bounds_are_local_midnights():
++    start, end = london_day_bounds(date(2026, 6, 1))
++    assert (start.hour, end.hour, end.day) == (0, 0, 2)
++
++
++def test_daily_charge_on_an_ordinary_day():
++    # 8,760,000.00 x 5% x 24 / 8,760 = 1,200.00
++    assert daily_charge(Decimal("8760000.00"), Decimal("0.05"), date(2026, 6, 1)) == Decimal("1200.00")
++
++
++def test_negative_overdraft_is_rejected():
++    with pytest.raises(ValueError):
++        daily_charge(Decimal("-1"), Decimal("0.05"), date(2026, 6, 1))
